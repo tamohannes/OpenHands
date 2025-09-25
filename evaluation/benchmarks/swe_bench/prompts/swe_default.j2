@@ -8,6 +8,16 @@ I've uploaded a python code repository in the directory {{ workspace_dir_name }}
 {{ instance.problem_statement }}
 </issue_description>
 
+{% if instance.edit_locations is defined and instance.edit_locations %}
+<edit_locations>
+Here I provide you the edit locations for Phase 3 with a justification on how these are the right edit locations to fix the issue:
+
+{{ instance.edit_locations }}
+
+Since the edit locations are provided above, you can skip Phase 3 (EXPLORATION) and proceed directly to Phase 4 (TEST CREATION) using the provided locations.
+</edit_locations>
+{% endif %}
+
 Can you help me implement the necessary changes to the repository so that the requirements specified in the <issue_description> are met?
 I've already taken care of all changes to any of the test files described in the <issue_description>. This means you DON'T have to modify the testing logic or any of the tests in any way!
 Also the development Python environment is already set up for you (i.e., all dependencies already installed), so you don't need to install other packages.
@@ -27,12 +37,17 @@ Phase 2. RUNNING: install and run the tests on the repository
    2.2 Install the environment and anything needed
    2.2 Iterate and figure out how to run the tests
 
+{% if instance.edit_locations is defined and instance.edit_locations %}
+Phase 3. SKIP EXPLORATION: Since edit locations are provided above, skip the exploration phase and use the provided locations.
+
+{% else %}
 Phase 3. EXPLORATION: find the files that are related to the problem and possible solutions
    3.1 Use `grep` to search for relevant methods, classes, keywords and error messages.
    3.2 Identify all files related to the problem statement.
    3.3 Propose the methods and files to fix the issue and explain why.
    3.4 From the possible file locations, select the most likely location to fix the issue.
 
+{% endif %}
 Phase 4. TEST CREATION: before implementing any fix, create a script to reproduce and verify the issue.
    4.1 Look at existing test files in the repository to understand the test format/structure.
    4.2 Create a minimal reproduction script that reproduces the located issue.
@@ -41,7 +56,7 @@ Phase 4. TEST CREATION: before implementing any fix, create a script to reproduc
 
 Phase 5. FIX ANALYSIS: state clearly the problem and how to fix it
    5.1 State clearly what the problem is.
-   5.2 State clearly where the problem is located.
+   5.2 State clearly where the problem is located{% if instance.edit_locations is defined and instance.edit_locations %} (refer to the provided edit locations){% endif %}.
    5.3 State clearly how the test reproduces the issue.
    5.4 State clearly the best practices to take into account in the fix.
    5.5 State clearly how to fix the problem.
