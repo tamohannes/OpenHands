@@ -12,7 +12,12 @@ I've uploaded a python code repository in the directory {{ workspace_dir_name }}
 <edit_locations>
 Here I provide you the edit locations for Phase 3 with a justification on how these are the right edit locations to fix the issue:
 
-{{ instance.edit_locations }}
+**Reasoning:** {{ instance.edit_locations.reasoning }}
+
+**Files to modify:**
+{% for location in instance.edit_locations.locations %}
+• {{ location.file_path }} (lines {{ location.start_line }}-{{ location.end_line }})
+{% endfor %}
 
 Since the edit locations are provided above, you can skip Phase 3 (EXPLORATION) and proceed directly to Phase 4 (TEST CREATION) using the provided locations.
 </edit_locations>
