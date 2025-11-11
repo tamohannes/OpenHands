@@ -135,9 +135,13 @@ def get_instruction(instance: pd.Series, metadata: EvalMetadata) -> MessageActio
     env = Environment(loader=FileSystemLoader(prompts_dir))
     template = env.get_template(template_name)
 
+    # Convert pandas Series to dict for easier template access
+    # This allows safe access to optional fields like 'locations' and 'findings'
+    instance_dict = instance.to_dict() if hasattr(instance, 'to_dict') else dict(instance)
+    
     # Prepare context for rendering
     context = {
-        'instance': instance,
+        'instance': instance_dict,
         'workspace_dir_name': workspace_dir_name,
         'metadata': metadata,  # Pass metadata if needed in templates
     }
@@ -145,7 +149,7 @@ def get_instruction(instance: pd.Series, metadata: EvalMetadata) -> MessageActio
     # Add specific context for swt-ci mode if needed
     if mode == 'swt-ci':
         context['test_instructions'] = (
-            f'The following command can be used to run the tests: `{list(MAP_REPO_TO_TEST_FRAMEWORK_VERBOSE[instance.repo].values())[0]}`. Make sure they fail in the expected way.\n'
+            f'The following command can be used to run the tests: `{list(MAP_REPO_TO_TEST_FRAMEWORK_VERBOSE[instance_dict.get("repo", "")].values())[0]}`. Make sure they fail in the expected way.\n'
         )
     else:
         context['test_instructions'] = ''  # Ensure it's defined for other modes

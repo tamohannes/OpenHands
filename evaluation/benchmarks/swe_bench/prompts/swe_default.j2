@@ -8,16 +8,27 @@ I've uploaded a python code repository in the directory {{ workspace_dir_name }}
 {{ instance.problem_statement }}
 </issue_description>
 
-{% if instance.edit_locations is defined and instance.edit_locations %}
+{% set direct_locations = instance.locations|default([], true) %}
+{% set edit_locs_obj = instance.edit_locations|default({}, true) %}
+{% set nested_locations = edit_locs_obj.locations|default([], true) if edit_locs_obj else [] %}
+{% set locations_list = direct_locations if direct_locations|length > 0 else nested_locations %}
+{% set has_locations = locations_list|length > 0 %}
+{% set findings_text = instance.findings|default('', true) %}
+{% set has_findings = findings_text|trim|length > 0 %}
+{% if has_locations %}
 <edit_locations>
-Here I provide you the edit locations for Phase 3 with a justification on how these are the right edit locations to fix the issue:
-
-**Reasoning:** {{ instance.edit_locations.reasoning }}
+Here I provide you the edit locations for Phase 3{% if has_findings %} along with findings that analyze the issue{% endif %}:
 
 **Files to modify:**
-{% for location in instance.edit_locations.locations %}
-• {{ location.file_path }} (lines {{ location.start_line }}-{{ location.end_line }})
+{% for location in locations_list %}
+{{ loop.index }}. {{ location.file_path }}{% if location.start_line is defined and location.start_line is not none %} (lines {{ location.start_line }}-{{ location.end_line }}){% endif %}
 {% endfor %}
+
+{% if has_findings %}
+**Findings:** The following findings provide detailed analysis of the issue, including location explanation, root cause, solution approach, dependencies, and testing considerations. Use these findings to understand the problem and guide your fix:
+
+{{ findings_text }}
+{% endif %}
 
 Since the edit locations are provided above, you can skip Phase 3 (EXPLORATION) and proceed directly to Phase 4 (TEST CREATION) using the provided locations.
 </edit_locations>
@@ -42,7 +53,7 @@ Phase 2. RUNNING: install and run the tests on the repository
    2.2 Install the environment and anything needed
    2.2 Iterate and figure out how to run the tests
 
-{% if instance.edit_locations is defined and instance.edit_locations %}
+{% if has_locations %}
 Phase 3. SKIP EXPLORATION: Since edit locations are provided above, skip the exploration phase and use the provided locations.
 
 {% else %}
@@ -61,7 +72,7 @@ Phase 4. TEST CREATION: before implementing any fix, create a script to reproduc
 
 Phase 5. FIX ANALYSIS: state clearly the problem and how to fix it
    5.1 State clearly what the problem is.
-   5.2 State clearly where the problem is located{% if instance.edit_locations is defined and instance.edit_locations %} (refer to the provided edit locations){% endif %}.
+   5.2 State clearly where the problem is located{% if has_locations %} (refer to the provided edit locations){% endif %}.
    5.3 State clearly how the test reproduces the issue.
    5.4 State clearly the best practices to take into account in the fix.
    5.5 State clearly how to fix the problem.
