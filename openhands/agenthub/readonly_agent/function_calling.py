@@ -13,6 +13,8 @@ from litellm import (
 
 from openhands.agenthub.codeact_agent.function_calling import (
     combine_thought,
+    extract_tool_calls_from_content,
+    extract_reasoning_from_content,
 )
 from openhands.agenthub.codeact_agent.tools import (
     FinishTool,
@@ -114,18 +116,57 @@ def response_to_actions(
     assert len(response.choices) == 1, 'Only one choice is supported for now'
     choice = response.choices[0]
     assistant_msg = choice.message
-    if hasattr(assistant_msg, 'tool_calls') and assistant_msg.tool_calls:
-        # Check if there's assistant_msg.content. If so, add it to the thought
-        thought = ''
+    
+    # Get tool calls from the standard tool_calls field
+    tool_calls = getattr(assistant_msg, 'tool_calls', None) or []
+    
+    # If no tool calls in standard field, check content for embedded tool calls
+    # This handles thinking models that output tool calls in content
+    if not tool_calls:
+        content_str = ''
         if isinstance(assistant_msg.content, str):
-            thought = assistant_msg.content
+            content_str = assistant_msg.content
         elif isinstance(assistant_msg.content, list):
             for msg in assistant_msg.content:
-                if msg['type'] == 'text':
-                    thought += msg['text']
+                if isinstance(msg, dict) and msg.get('type') == 'text':
+                    content_str += msg.get('text', '')
+                elif isinstance(msg, str):
+                    content_str += msg
+        
+        if content_str:
+            extracted_tool_calls = extract_tool_calls_from_content(content_str)
+            if extracted_tool_calls:
+                tool_calls = extracted_tool_calls
+                logger.debug(f'Extracted {len(tool_calls)} tool call(s) from content')
+
+    if tool_calls:
+        # Check if there's assistant_msg.content. If so, add it to the thought
+        # Extract reasoning traces if present
+        thought = ''
+        reasoning = ''
+        if isinstance(assistant_msg.content, str):
+            cleaned_content, reasoning = extract_reasoning_from_content(assistant_msg.content)
+            thought = cleaned_content
+        elif isinstance(assistant_msg.content, list):
+            for msg in assistant_msg.content:
+                if isinstance(msg, dict) and msg.get('type') == 'text':
+                    text_content = msg.get('text', '')
+                    cleaned_text, extracted_reasoning = extract_reasoning_from_content(text_content)
+                    thought += cleaned_text
+                    if extracted_reasoning:
+                        reasoning += extracted_reasoning + '\n'
+                elif isinstance(msg, str):
+                    cleaned_text, extracted_reasoning = extract_reasoning_from_content(msg)
+                    thought += cleaned_text
+                    if extracted_reasoning:
+                        reasoning += extracted_reasoning + '\n'
+        
+        # Combine reasoning with thought if present
+        if reasoning:
+            thought = f'{reasoning}\n{thought}' if thought else reasoning
 
         # Process each tool call to OpenHands action
-        for i, tool_call in enumerate(assistant_msg.tool_calls):
+        for i, tool_call in enumerate(tool_calls):
             action: Action
             logger.debug(f'Tool call in function_calling.py: {tool_call}')
             try:
@@ -216,7 +257,7 @@ def response_to_actions(
                 tool_call_id=tool_call.id,
                 function_name=tool_call.function.name,
                 model_response=response,
-                total_calls_in_response=len(assistant_msg.tool_calls),
+                total_calls_in_response=len(tool_calls),
             )
             actions.append(action)
     else:

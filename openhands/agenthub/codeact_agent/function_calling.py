@@ -4,8 +4,11 @@ This is similar to the functionality of `CodeActResponseParser`.
 """
 
 import json
+import re
+import uuid
 
 from litellm import (
+    ChatCompletionMessageToolCall,
     ModelResponse,
 )
 
@@ -70,6 +73,119 @@ def set_security_risk(action: Action, arguments: dict) -> None:
             logger.warning(f'Invalid security_risk value: {arguments["security_risk"]}')
 
 
+def extract_tool_calls_from_content(content: str) -> list[ChatCompletionMessageToolCall]:
+    """Extract tool calls from content field when embedded in thinking model responses.
+    
+    Thinking models (e.g., Qwen3-Thinking) output tool calls embedded in the content
+    field within <tool_call> tags rather than in the tool_calls field. This function
+    parses those embedded tool calls and converts them to ChatCompletionMessageToolCall format.
+    
+    Args:
+        content: The content string that may contain embedded tool calls
+        
+    Returns:
+        List of ChatCompletionMessageToolCall objects extracted from content, or empty list if none found
+    """
+    if not content or not isinstance(content, str):
+        return []
+    
+    tool_calls = []
+    
+    # Pattern to match <tool_call>...</tool_call> tags
+    # This handles both single-line and multi-line tool calls
+    pattern = r'<tool_call>\s*(.*?)\s*</tool_call>'
+    matches = re.finditer(pattern, content, re.DOTALL)
+    
+    for match in matches:
+        tool_call_content = match.group(1).strip()
+        if not tool_call_content:
+            continue
+            
+        try:
+            # Parse the JSON tool call data
+            tool_call_data = json.loads(tool_call_content)
+            
+            # Extract name and arguments
+            tool_name = tool_call_data.get('name', '')
+            tool_arguments = tool_call_data.get('arguments', {})
+            
+            # Convert arguments to JSON string if it's a dict
+            if isinstance(tool_arguments, dict):
+                arguments_str = json.dumps(tool_arguments)
+            elif isinstance(tool_arguments, str):
+                arguments_str = tool_arguments
+            else:
+                logger.warning(f'Unexpected tool arguments type: {type(tool_arguments)}')
+                continue
+            
+            if not tool_name:
+                logger.warning('Tool call missing name field')
+                continue
+            
+            # Create a ChatCompletionMessageToolCall object
+            tool_call = ChatCompletionMessageToolCall(
+                id=f'call_{uuid.uuid4().hex[:16]}',
+                type='function',
+                function={
+                    'name': tool_name,
+                    'arguments': arguments_str,
+                },
+            )
+            tool_calls.append(tool_call)
+            logger.debug(f'Extracted embedded tool call: {tool_name}')
+            
+        except json.JSONDecodeError as e:
+            logger.warning(f'Failed to parse tool call JSON: {tool_call_content[:100]}... Error: {e}')
+            continue
+        except Exception as e:
+            logger.warning(f'Error extracting tool call: {e}')
+            continue
+    
+    return tool_calls
+
+
+def extract_reasoning_from_content(content: str) -> tuple[str, str]:
+    """Extract reasoning traces from content and return cleaned content and reasoning.
+    
+    Thinking models may include reasoning traces in tags like <think> or <think>.
+    This function extracts the reasoning and returns both the cleaned content and the reasoning text.
+    
+    Args:
+        content: The content string that may contain reasoning traces
+        
+    Returns:
+        Tuple of (cleaned_content, reasoning_text)
+    """
+    if not content or not isinstance(content, str):
+        return content, ''
+    
+    reasoning_parts = []
+    cleaned_content = content
+    
+    # Pattern to match reasoning tags: <think>, <think>, etc.
+    reasoning_patterns = [
+        r'<think>(.*?)</think>',
+        r'<think>(.*?)</think>',
+        r'<reasoning>(.*?)</reasoning>',
+    ]
+    
+    for pattern in reasoning_patterns:
+        matches = re.finditer(pattern, cleaned_content, re.DOTALL)
+        for match in matches:
+            reasoning_text = match.group(1).strip()
+            if reasoning_text:
+                reasoning_parts.append(reasoning_text)
+            # Remove the reasoning tag from content
+            cleaned_content = cleaned_content.replace(match.group(0), '')
+    
+    reasoning = '\n'.join(reasoning_parts).strip()
+    
+    # Clean up extra whitespace
+    cleaned_content = re.sub(r'\n\s*\n', '\n', cleaned_content).strip()
+    
+    return cleaned_content, reasoning
+
+
 def response_to_actions(
     response: ModelResponse, mcp_tool_names: list[str] | None = None
 ) -> list[Action]:
@@ -77,18 +193,57 @@ def response_to_actions(
     assert len(response.choices) == 1, 'Only one choice is supported for now'
     choice = response.choices[0]
     assistant_msg = choice.message
-    if hasattr(assistant_msg, 'tool_calls') and assistant_msg.tool_calls:
-        # Check if there's assistant_msg.content. If so, add it to the thought
-        thought = ''
+    
+    # Get tool calls from the standard tool_calls field
+    tool_calls = getattr(assistant_msg, 'tool_calls', None) or []
+    
+    # If no tool calls in standard field, check content for embedded tool calls
+    # This handles thinking models that output tool calls in content
+    if not tool_calls:
+        content_str = ''
         if isinstance(assistant_msg.content, str):
-            thought = assistant_msg.content
+            content_str = assistant_msg.content
         elif isinstance(assistant_msg.content, list):
             for msg in assistant_msg.content:
-                if msg['type'] == 'text':
-                    thought += msg['text']
+                if isinstance(msg, dict) and msg.get('type') == 'text':
+                    content_str += msg.get('text', '')
+                elif isinstance(msg, str):
+                    content_str += msg
+        
+        if content_str:
+            extracted_tool_calls = extract_tool_calls_from_content(content_str)
+            if extracted_tool_calls:
+                tool_calls = extracted_tool_calls
+                logger.debug(f'Extracted {len(tool_calls)} tool call(s) from content')
+    
+    if tool_calls:
+        # Check if there's assistant_msg.content. If so, add it to the thought
+        # Extract reasoning traces if present
+        thought = ''
+        reasoning = ''
+        if isinstance(assistant_msg.content, str):
+            cleaned_content, reasoning = extract_reasoning_from_content(assistant_msg.content)
+            thought = cleaned_content
+        elif isinstance(assistant_msg.content, list):
+            for msg in assistant_msg.content:
+                if isinstance(msg, dict) and msg.get('type') == 'text':
+                    text_content = msg.get('text', '')
+                    cleaned_text, extracted_reasoning = extract_reasoning_from_content(text_content)
+                    thought += cleaned_text
+                    if extracted_reasoning:
+                        reasoning += extracted_reasoning + '\n'
+                elif isinstance(msg, str):
+                    cleaned_text, extracted_reasoning = extract_reasoning_from_content(msg)
+                    thought += cleaned_text
+                    if extracted_reasoning:
+                        reasoning += extracted_reasoning + '\n'
+        
+        # Combine reasoning with thought if present
+        if reasoning:
+            thought = f'{reasoning}\n{thought}' if thought else reasoning
 
         # Process each tool call to OpenHands action
-        for i, tool_call in enumerate(assistant_msg.tool_calls):
+        for i, tool_call in enumerate(tool_calls):
             action: Action
             logger.debug(f'Tool call in function_calling.py: {tool_call}')
             try:
@@ -316,7 +471,7 @@ def response_to_actions(
                 tool_call_id=tool_call.id,
                 function_name=tool_call.function.name,
                 model_response=response,
-                total_calls_in_response=len(assistant_msg.tool_calls),
+                total_calls_in_response=len(tool_calls),
             )
             actions.append(action)
     else:
