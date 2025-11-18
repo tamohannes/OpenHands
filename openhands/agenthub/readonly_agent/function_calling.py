@@ -170,16 +170,39 @@ def response_to_actions(
             action: Action
             logger.debug(f'Tool call in function_calling.py: {tool_call}')
             try:
-                arguments = json.loads(tool_call.function.arguments)
+                # Handle both dict and object access for function attribute
+                if not hasattr(tool_call, 'function'):
+                    raise FunctionCallValidationError(f'Tool call missing function attribute: {tool_call}')
+                
+                function_obj = tool_call.function
+                
+                # Try to access as dict first (for manually created tool calls)
+                if isinstance(function_obj, dict):
+                    function_name = function_obj.get('name', '')
+                    function_arguments = function_obj.get('arguments', '{}')
+                # Try to access as object with attributes (for litellm-created tool calls)
+                elif hasattr(function_obj, 'name') and hasattr(function_obj, 'arguments'):
+                    function_name = function_obj.name
+                    function_arguments = function_obj.arguments
+                # Fallback: try dict-style access if it supports it
+                elif hasattr(function_obj, 'get'):
+                    function_name = function_obj.get('name', '')
+                    function_arguments = function_obj.get('arguments', '{}')
+                else:
+                    raise FunctionCallValidationError(
+                        f'Unable to access function name/arguments from tool call. Function type: {type(function_obj)}, value: {function_obj}'
+                    )
+                
+                arguments = json.loads(function_arguments)
             except json.decoder.JSONDecodeError as e:
                 raise FunctionCallValidationError(
-                    f'Failed to parse tool call arguments: {tool_call.function.arguments}'
+                    f'Failed to parse tool call arguments: {function_arguments}'
                 ) from e
 
             # ================================================
             # AgentFinishAction
             # ================================================
-            if tool_call.function.name == FinishTool['function']['name']:
+            if function_name == FinishTool['function']['name']:
                 action = AgentFinishAction(
                     final_thought=arguments.get('message', ''),
                 )
@@ -187,10 +210,10 @@ def response_to_actions(
             # ================================================
             # ViewTool (ACI-based file viewer, READ-ONLY)
             # ================================================
-            elif tool_call.function.name == ViewTool['function']['name']:
+            elif function_name == ViewTool['function']['name']:
                 if 'path' not in arguments:
                     raise FunctionCallValidationError(
-                        f'Missing required argument "path" in tool call {tool_call.function.name}'
+                        f'Missing required argument "path" in tool call {function_name}'
                     )
                 action = FileReadAction(
                     path=arguments['path'],
@@ -201,16 +224,16 @@ def response_to_actions(
             # ================================================
             # AgentThinkAction
             # ================================================
-            elif tool_call.function.name == ThinkTool['function']['name']:
+            elif function_name == ThinkTool['function']['name']:
                 action = AgentThinkAction(thought=arguments.get('thought', ''))
 
             # ================================================
             # GrepTool (file content search)
             # ================================================
-            elif tool_call.function.name == GrepTool['function']['name']:
+            elif function_name == GrepTool['function']['name']:
                 if 'pattern' not in arguments:
                     raise FunctionCallValidationError(
-                        f'Missing required argument "pattern" in tool call {tool_call.function.name}'
+                        f'Missing required argument "pattern" in tool call {function_name}'
                     )
 
                 pattern = arguments['pattern']
@@ -223,10 +246,10 @@ def response_to_actions(
             # ================================================
             # GlobTool (file pattern matching)
             # ================================================
-            elif tool_call.function.name == GlobTool['function']['name']:
+            elif function_name == GlobTool['function']['name']:
                 if 'pattern' not in arguments:
                     raise FunctionCallValidationError(
-                        f'Missing required argument "pattern" in tool call {tool_call.function.name}'
+                        f'Missing required argument "pattern" in tool call {function_name}'
                     )
 
                 pattern = arguments['pattern']
@@ -238,15 +261,15 @@ def response_to_actions(
             # ================================================
             # MCPAction (MCP)
             # ================================================
-            elif mcp_tool_names and tool_call.function.name in mcp_tool_names:
+            elif mcp_tool_names and function_name in mcp_tool_names:
                 action = MCPAction(
-                    name=tool_call.function.name,
+                    name=function_name,
                     arguments=arguments,
                 )
 
             else:
                 raise FunctionCallNotExistsError(
-                    f'Tool {tool_call.function.name} is not registered. (arguments: {arguments}). Please check the tool name and retry with an existing tool.'
+                    f'Tool {function_name} is not registered. (arguments: {arguments}). Please check the tool name and retry with an existing tool.'
                 )
 
             # We only add thought to the first action
@@ -255,7 +278,7 @@ def response_to_actions(
             # Add metadata for tool calling
             action.tool_call_metadata = ToolCallMetadata(
                 tool_call_id=tool_call.id,
-                function_name=tool_call.function.name,
+                function_name=function_name,
                 model_response=response,
                 total_calls_in_response=len(tool_calls),
             )

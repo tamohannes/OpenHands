@@ -247,20 +247,46 @@ def response_to_actions(
             action: Action
             logger.debug(f'Tool call in function_calling.py: {tool_call}')
             try:
-                arguments = json.loads(tool_call.function.arguments)
+                # Handle both dict and object access for function attribute
+                # First, safely get the function attribute
+                if not hasattr(tool_call, 'function'):
+                    raise FunctionCallValidationError(
+                        f'Tool call missing function attribute: {tool_call}'
+                    )
+                
+                function_obj = tool_call.function
+                
+                # Try to access as dict first (for manually created tool calls)
+                if isinstance(function_obj, dict):
+                    function_name = function_obj.get('name', '')
+                    function_arguments = function_obj.get('arguments', '{}')
+                # Try to access as object with attributes (for litellm-created tool calls)
+                elif hasattr(function_obj, 'name') and hasattr(function_obj, 'arguments'):
+                    function_name = function_obj.name
+                    function_arguments = function_obj.arguments
+                # Fallback: try dict-style access if it supports it
+                elif hasattr(function_obj, 'get'):
+                    function_name = function_obj.get('name', '')
+                    function_arguments = function_obj.get('arguments', '{}')
+                else:
+                    raise FunctionCallValidationError(
+                        f'Unable to access function name/arguments from tool call. Function type: {type(function_obj)}, value: {function_obj}'
+                    )
+                
+                arguments = json.loads(function_arguments)
             except json.decoder.JSONDecodeError as e:
                 raise FunctionCallValidationError(
-                    f'Failed to parse tool call arguments: {tool_call.function.arguments}'
+                    f'Failed to parse tool call arguments: {function_arguments}'
                 ) from e
 
             # ================================================
             # CmdRunTool (Bash)
             # ================================================
 
-            if tool_call.function.name == create_cmd_run_tool()['function']['name']:
+            if function_name == create_cmd_run_tool()['function']['name']:
                 if 'command' not in arguments:
                     raise FunctionCallValidationError(
-                        f'Missing required argument "command" in tool call {tool_call.function.name}'
+                        f'Missing required argument "command" in tool call {function_name}'
                     )
                 # convert is_input to boolean
                 is_input = arguments.get('is_input', 'false') == 'true'
@@ -279,10 +305,10 @@ def response_to_actions(
             # ================================================
             # IPythonTool (Jupyter)
             # ================================================
-            elif tool_call.function.name == IPythonTool['function']['name']:
+            elif function_name == IPythonTool['function']['name']:
                 if 'code' not in arguments:
                     raise FunctionCallValidationError(
-                        f'Missing required argument "code" in tool call {tool_call.function.name}'
+                        f'Missing required argument "code" in tool call {function_name}'
                     )
                 action = IPythonRunCellAction(code=arguments['code'])
                 set_security_risk(action, arguments)
@@ -290,7 +316,7 @@ def response_to_actions(
             # ================================================
             # AgentDelegateAction (Delegation to another agent)
             # ================================================
-            elif tool_call.function.name == 'delegate_to_browsing_agent':
+            elif function_name == 'delegate_to_browsing_agent':
                 action = AgentDelegateAction(
                     agent='BrowsingAgent',
                     inputs=arguments,
@@ -299,7 +325,7 @@ def response_to_actions(
             # ================================================
             # AgentFinishAction
             # ================================================
-            elif tool_call.function.name == FinishTool['function']['name']:
+            elif function_name == FinishTool['function']['name']:
                 action = AgentFinishAction(
                     final_thought=arguments.get('message', ''),
                 )
@@ -307,14 +333,14 @@ def response_to_actions(
             # ================================================
             # LLMBasedFileEditTool (LLM-based file editor, deprecated)
             # ================================================
-            elif tool_call.function.name == LLMBasedFileEditTool['function']['name']:
+            elif function_name == LLMBasedFileEditTool['function']['name']:
                 if 'path' not in arguments:
                     raise FunctionCallValidationError(
-                        f'Missing required argument "path" in tool call {tool_call.function.name}'
+                        f'Missing required argument "path" in tool call {function_name}'
                     )
                 if 'content' not in arguments:
                     raise FunctionCallValidationError(
-                        f'Missing required argument "content" in tool call {tool_call.function.name}'
+                        f'Missing required argument "content" in tool call {function_name}'
                     )
                 action = FileEditAction(
                     path=arguments['path'],
@@ -326,16 +352,16 @@ def response_to_actions(
                     ),
                 )
             elif (
-                tool_call.function.name
+                function_name
                 == create_str_replace_editor_tool()['function']['name']
             ):
                 if 'command' not in arguments:
                     raise FunctionCallValidationError(
-                        f'Missing required argument "command" in tool call {tool_call.function.name}'
+                        f'Missing required argument "command" in tool call {function_name}'
                     )
                 if 'path' not in arguments:
                     raise FunctionCallValidationError(
-                        f'Missing required argument "path" in tool call {tool_call.function.name}'
+                        f'Missing required argument "path" in tool call {function_name}'
                     )
                 path = arguments['path']
                 command = arguments['command']
@@ -371,7 +397,7 @@ def response_to_actions(
                                 valid_kwargs_for_editor[key] = value
                         else:
                             raise FunctionCallValidationError(
-                                f'Unexpected argument {key} in tool call {tool_call.function.name}. Allowed arguments are: {valid_params}'
+                                f'Unexpected argument {key} in tool call {function_name}. Allowed arguments are: {valid_params}'
                             )
 
                     action = FileEditAction(
@@ -385,22 +411,22 @@ def response_to_actions(
             # ================================================
             # AgentThinkAction
             # ================================================
-            elif tool_call.function.name == ThinkTool['function']['name']:
+            elif function_name == ThinkTool['function']['name']:
                 action = AgentThinkAction(thought=arguments.get('thought', ''))
 
             # ================================================
             # CondensationRequestAction
             # ================================================
-            elif tool_call.function.name == CondensationRequestTool['function']['name']:
+            elif function_name == CondensationRequestTool['function']['name']:
                 action = CondensationRequestAction()
 
             # ================================================
             # BrowserTool
             # ================================================
-            elif tool_call.function.name == BrowserTool['function']['name']:
+            elif function_name == BrowserTool['function']['name']:
                 if 'code' not in arguments:
                     raise FunctionCallValidationError(
-                        f'Missing required argument "code" in tool call {tool_call.function.name}'
+                        f'Missing required argument "code" in tool call {function_name}'
                     )
                 action = BrowseInteractiveAction(browser_actions=arguments['code'])
                 set_security_risk(action, arguments)
@@ -408,14 +434,14 @@ def response_to_actions(
             # ================================================
             # TaskTrackingAction
             # ================================================
-            elif tool_call.function.name == TASK_TRACKER_TOOL_NAME:
+            elif function_name == TASK_TRACKER_TOOL_NAME:
                 if 'command' not in arguments:
                     raise FunctionCallValidationError(
-                        f'Missing required argument "command" in tool call {tool_call.function.name}'
+                        f'Missing required argument "command" in tool call {function_name}'
                     )
                 if arguments['command'] == 'plan' and 'task_list' not in arguments:
                     raise FunctionCallValidationError(
-                        f'Missing required argument "task_list" for "plan" command in tool call {tool_call.function.name}'
+                        f'Missing required argument "task_list" for "plan" command in tool call {function_name}'
                     )
 
                 raw_task_list = arguments.get('task_list', [])
@@ -453,14 +479,14 @@ def response_to_actions(
             # ================================================
             # MCPAction (MCP)
             # ================================================
-            elif mcp_tool_names and tool_call.function.name in mcp_tool_names:
+            elif mcp_tool_names and function_name in mcp_tool_names:
                 action = MCPAction(
-                    name=tool_call.function.name,
+                    name=function_name,
                     arguments=arguments,
                 )
             else:
                 raise FunctionCallNotExistsError(
-                    f'Tool {tool_call.function.name} is not registered. (arguments: {arguments}). Please check the tool name and retry with an existing tool.'
+                    f'Tool {function_name} is not registered. (arguments: {arguments}). Please check the tool name and retry with an existing tool.'
                 )
 
             # We only add thought to the first action
@@ -469,7 +495,7 @@ def response_to_actions(
             # Add metadata for tool calling
             action.tool_call_metadata = ToolCallMetadata(
                 tool_call_id=tool_call.id,
-                function_name=tool_call.function.name,
+                function_name=function_name,
                 model_response=response,
                 total_calls_in_response=len(tool_calls),
             )
