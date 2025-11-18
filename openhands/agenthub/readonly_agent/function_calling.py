@@ -201,18 +201,21 @@ def response_to_actions(
                     if extracted_reasoning:
                         reasoning += extracted_reasoning + '\n'
         
+        # Strip reasoning to check if it's non-empty
+        reasoning_stripped = reasoning.strip() if reasoning else ''
+        
         # For thinking models: if reasoning exists and tool calls were extracted from content,
         # create a separate AgentThinkAction as the first action
-        if reasoning and tool_calls_extracted_from_content:
-            think_action = AgentThinkAction(thought=reasoning)
+        if reasoning_stripped and tool_calls_extracted_from_content:
+            think_action = AgentThinkAction(thought=reasoning_stripped)
             think_action.response_id = response.id
             actions.append(think_action)
             logger.debug('Created AgentThinkAction for reasoning trace from thinking model')
         
         # For regular models or when reasoning should be combined with thought:
         # Combine reasoning with thought if present (but only if we didn't create a separate think action)
-        if reasoning and not tool_calls_extracted_from_content:
-            thought = f'{reasoning}\n{thought}' if thought else reasoning
+        if reasoning_stripped and not tool_calls_extracted_from_content:
+            thought = f'{reasoning_stripped}\n{thought}' if thought else reasoning_stripped
 
         # Process each tool call to OpenHands action
         for i, tool_call in enumerate(tool_calls):
@@ -340,7 +343,8 @@ def response_to_actions(
 
             # We only add thought to the first action, and only if we didn't create a separate think action
             # (for thinking models, reasoning is already in the separate think action)
-            if i == 0 and not (tool_calls_extracted_from_content and reasoning):
+            # Note: reasoning_stripped is computed above before the loop
+            if i == 0 and not (tool_calls_extracted_from_content and reasoning_stripped):
                 action = combine_thought(action, thought)
             # Add metadata for tool calling
             # Safely get tool_call.id (handle both dict and object access)
@@ -372,6 +376,17 @@ def response_to_actions(
     for action in actions:
         action.response_id = response.id
 
+    # Safety check: ensure we always have at least one action
+    # This should never happen, but if it does, create a MessageAction as fallback
+    if len(actions) == 0:
+        logger.warning('No actions were created from response, creating fallback MessageAction')
+        fallback_action = MessageAction(
+            content=str(assistant_msg.content) if assistant_msg.content else '',
+            wait_for_response=True,
+        )
+        fallback_action.response_id = response.id
+        actions.append(fallback_action)
+    
     assert len(actions) >= 1
     return actions
 
