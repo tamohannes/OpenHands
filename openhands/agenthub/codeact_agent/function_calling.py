@@ -162,21 +162,43 @@ def extract_reasoning_from_content(content: str) -> tuple[str, str]:
     reasoning_parts = []
     cleaned_content = content
     
-    # Pattern to match reasoning tags: <think>, <think>, etc.
+    # Pattern to match reasoning tags: <think>, <reasoning>, <think>, etc.
+    # Handle both paired tags and standalone closing tags
     reasoning_patterns = [
         r'<think>(.*?)</think>',
-        r'<think>(.*?)</think>',
         r'<reasoning>(.*?)</reasoning>',
+        r'<think>(.*?)</think>',
     ]
     
+    # First, try to match paired tags
     for pattern in reasoning_patterns:
-        matches = re.finditer(pattern, cleaned_content, re.DOTALL)
+        matches = list(re.finditer(pattern, cleaned_content, re.DOTALL))
         for match in matches:
             reasoning_text = match.group(1).strip()
             if reasoning_text:
                 reasoning_parts.append(reasoning_text)
             # Remove the reasoning tag from content
             cleaned_content = cleaned_content.replace(match.group(0), '')
+    
+    # Handle standalone closing tags (e.g., </think> or </think> without opening tag)
+    # Extract everything before the closing tag as reasoning
+    standalone_closing_tags = ['</think>', '</reasoning>', '</think>']
+    corresponding_openings = ['<think>', '<reasoning>', '<think>']
+    
+    for closing_tag, opening_tag in zip(standalone_closing_tags, corresponding_openings):
+        if closing_tag in cleaned_content:
+            # Check if there's a matching opening tag
+            has_opening = opening_tag in cleaned_content
+            if not has_opening:
+                # Standalone closing tag - everything before it is reasoning
+                idx = cleaned_content.find(closing_tag)
+                if idx > 0:
+                    # Everything before the closing tag is reasoning
+                    reasoning_text = cleaned_content[:idx].strip()
+                    if reasoning_text:
+                        reasoning_parts.append(reasoning_text)
+                    # Remove everything up to and including the closing tag
+                    cleaned_content = cleaned_content[idx + len(closing_tag):].strip()
     
     reasoning = '\n'.join(reasoning_parts).strip()
     
@@ -256,22 +278,40 @@ def response_to_actions(
                 
                 function_obj = tool_call.function
                 
-                # Try to access as dict first (for manually created tool calls)
+                # Try multiple methods to access function name and arguments
+                # This handles both dict and object types from litellm
+                function_name = None
+                function_arguments = None
+                
+                # Method 1: Try dict access
                 if isinstance(function_obj, dict):
                     function_name = function_obj.get('name', '')
                     function_arguments = function_obj.get('arguments', '{}')
-                # Try to access as object with attributes (for litellm-created tool calls)
-                elif hasattr(function_obj, 'name') and hasattr(function_obj, 'arguments'):
-                    function_name = function_obj.name
-                    function_arguments = function_obj.arguments
-                # Fallback: try dict-style access if it supports it
-                elif hasattr(function_obj, 'get'):
+                # Method 2: Try attribute access (for litellm objects)
+                elif hasattr(function_obj, 'name'):
+                    function_name = getattr(function_obj, 'name', '')
+                    function_arguments = getattr(function_obj, 'arguments', '{}')
+                # Method 3: Try dict-style get method
+                elif hasattr(function_obj, 'get') and callable(getattr(function_obj, 'get', None)):
                     function_name = function_obj.get('name', '')
                     function_arguments = function_obj.get('arguments', '{}')
-                else:
+                # Method 4: Try accessing as dict-like object
+                elif hasattr(function_obj, '__getitem__'):
+                    try:
+                        function_name = function_obj['name']
+                        function_arguments = function_obj['arguments']
+                    except (KeyError, TypeError):
+                        pass
+                
+                # Validate we got the values
+                if function_name is None or function_arguments is None:
                     raise FunctionCallValidationError(
-                        f'Unable to access function name/arguments from tool call. Function type: {type(function_obj)}, value: {function_obj}'
+                        f'Unable to access function name/arguments from tool call. Function type: {type(function_obj)}, value: {function_obj}, hasattr name: {hasattr(function_obj, "name") if hasattr(function_obj, "__class__") else "N/A"}'
                     )
+                
+                # Ensure function_arguments is a string
+                if not isinstance(function_arguments, str):
+                    function_arguments = json.dumps(function_arguments) if function_arguments else '{}'
                 
                 arguments = json.loads(function_arguments)
             except json.decoder.JSONDecodeError as e:
@@ -493,8 +533,15 @@ def response_to_actions(
             if i == 0:
                 action = combine_thought(action, thought)
             # Add metadata for tool calling
+            # Safely get tool_call.id (handle both dict and object access)
+            tool_call_id = getattr(tool_call, 'id', None)
+            if tool_call_id is None and isinstance(tool_call, dict):
+                tool_call_id = tool_call.get('id', f'call_{uuid.uuid4().hex[:16]}')
+            elif tool_call_id is None:
+                tool_call_id = f'call_{uuid.uuid4().hex[:16]}'
+            
             action.tool_call_metadata = ToolCallMetadata(
-                tool_call_id=tool_call.id,
+                tool_call_id=tool_call_id,
                 function_name=function_name,
                 model_response=response,
                 total_calls_in_response=len(tool_calls),

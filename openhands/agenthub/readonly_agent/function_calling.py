@@ -4,7 +4,9 @@ This is similar to the functionality of `CodeActResponseParser`.
 """
 
 import json
+import re
 import shlex
+import uuid
 
 from litellm import (
     ChatCompletionToolParam,
@@ -109,6 +111,31 @@ def glob_to_cmdrun(pattern: str, path: str = '.') -> str:
     return echo_cmd + complete_cmd
 
 
+def remove_tool_call_tags(content: str) -> str:
+    """Remove <tool_call>...</tool_call> tags from content.
+    
+    This is used after extracting tool calls from thinking model responses
+    to ensure the tool_call tags don't appear in message content.
+    
+    Args:
+        content: The content string that may contain <tool_call> tags
+        
+    Returns:
+        Content with all <tool_call> tags removed
+    """
+    if not content or not isinstance(content, str):
+        return content
+    
+    # Pattern to match <tool_call>...</tool_call> tags (handles multi-line)
+    pattern = r'<tool_call>\s*.*?\s*</tool_call>'
+    cleaned_content = re.sub(pattern, '', content, flags=re.DOTALL)
+    
+    # Clean up extra whitespace
+    cleaned_content = re.sub(r'\n\s*\n', '\n', cleaned_content).strip()
+    
+    return cleaned_content
+
+
 def response_to_actions(
     response: ModelResponse, mcp_tool_names: list[str] | None = None
 ) -> list[Action]:
@@ -119,6 +146,9 @@ def response_to_actions(
     
     # Get tool calls from the standard tool_calls field
     tool_calls = getattr(assistant_msg, 'tool_calls', None) or []
+    
+    # Track if tool calls were extracted from content (thinking model case)
+    tool_calls_extracted_from_content = False
     
     # If no tool calls in standard field, check content for embedded tool calls
     # This handles thinking models that output tool calls in content
@@ -137,6 +167,7 @@ def response_to_actions(
             extracted_tool_calls = extract_tool_calls_from_content(content_str)
             if extracted_tool_calls:
                 tool_calls = extracted_tool_calls
+                tool_calls_extracted_from_content = True
                 logger.debug(f'Extracted {len(tool_calls)} tool call(s) from content')
 
     if tool_calls:
@@ -146,23 +177,41 @@ def response_to_actions(
         reasoning = ''
         if isinstance(assistant_msg.content, str):
             cleaned_content, reasoning = extract_reasoning_from_content(assistant_msg.content)
+            # Remove tool_call tags if they were extracted from content
+            if tool_calls_extracted_from_content:
+                cleaned_content = remove_tool_call_tags(cleaned_content)
             thought = cleaned_content
         elif isinstance(assistant_msg.content, list):
             for msg in assistant_msg.content:
                 if isinstance(msg, dict) and msg.get('type') == 'text':
                     text_content = msg.get('text', '')
                     cleaned_text, extracted_reasoning = extract_reasoning_from_content(text_content)
+                    # Remove tool_call tags if they were extracted from content
+                    if tool_calls_extracted_from_content:
+                        cleaned_text = remove_tool_call_tags(cleaned_text)
                     thought += cleaned_text
                     if extracted_reasoning:
                         reasoning += extracted_reasoning + '\n'
                 elif isinstance(msg, str):
                     cleaned_text, extracted_reasoning = extract_reasoning_from_content(msg)
+                    # Remove tool_call tags if they were extracted from content
+                    if tool_calls_extracted_from_content:
+                        cleaned_text = remove_tool_call_tags(cleaned_text)
                     thought += cleaned_text
                     if extracted_reasoning:
                         reasoning += extracted_reasoning + '\n'
         
-        # Combine reasoning with thought if present
-        if reasoning:
+        # For thinking models: if reasoning exists and tool calls were extracted from content,
+        # create a separate AgentThinkAction as the first action
+        if reasoning and tool_calls_extracted_from_content:
+            think_action = AgentThinkAction(thought=reasoning)
+            think_action.response_id = response.id
+            actions.append(think_action)
+            logger.debug('Created AgentThinkAction for reasoning trace from thinking model')
+        
+        # For regular models or when reasoning should be combined with thought:
+        # Combine reasoning with thought if present (but only if we didn't create a separate think action)
+        if reasoning and not tool_calls_extracted_from_content:
             thought = f'{reasoning}\n{thought}' if thought else reasoning
 
         # Process each tool call to OpenHands action
@@ -176,22 +225,39 @@ def response_to_actions(
                 
                 function_obj = tool_call.function
                 
-                # Try to access as dict first (for manually created tool calls)
+                # Try multiple methods to access function name and arguments
+                function_name = None
+                function_arguments = None
+                
+                # Method 1: Try dict access
                 if isinstance(function_obj, dict):
                     function_name = function_obj.get('name', '')
                     function_arguments = function_obj.get('arguments', '{}')
-                # Try to access as object with attributes (for litellm-created tool calls)
-                elif hasattr(function_obj, 'name') and hasattr(function_obj, 'arguments'):
-                    function_name = function_obj.name
-                    function_arguments = function_obj.arguments
-                # Fallback: try dict-style access if it supports it
-                elif hasattr(function_obj, 'get'):
+                # Method 2: Try attribute access (for litellm objects)
+                elif hasattr(function_obj, 'name'):
+                    function_name = getattr(function_obj, 'name', '')
+                    function_arguments = getattr(function_obj, 'arguments', '{}')
+                # Method 3: Try dict-style get method
+                elif hasattr(function_obj, 'get') and callable(getattr(function_obj, 'get', None)):
                     function_name = function_obj.get('name', '')
                     function_arguments = function_obj.get('arguments', '{}')
-                else:
+                # Method 4: Try accessing as dict-like object
+                elif hasattr(function_obj, '__getitem__'):
+                    try:
+                        function_name = function_obj['name']
+                        function_arguments = function_obj['arguments']
+                    except (KeyError, TypeError):
+                        pass
+                
+                # Validate we got the values
+                if function_name is None or function_arguments is None:
                     raise FunctionCallValidationError(
                         f'Unable to access function name/arguments from tool call. Function type: {type(function_obj)}, value: {function_obj}'
                     )
+                
+                # Ensure function_arguments is a string
+                if not isinstance(function_arguments, str):
+                    function_arguments = json.dumps(function_arguments) if function_arguments else '{}'
                 
                 arguments = json.loads(function_arguments)
             except json.decoder.JSONDecodeError as e:
@@ -272,12 +338,20 @@ def response_to_actions(
                     f'Tool {function_name} is not registered. (arguments: {arguments}). Please check the tool name and retry with an existing tool.'
                 )
 
-            # We only add thought to the first action
-            if i == 0:
+            # We only add thought to the first action, and only if we didn't create a separate think action
+            # (for thinking models, reasoning is already in the separate think action)
+            if i == 0 and not (tool_calls_extracted_from_content and reasoning):
                 action = combine_thought(action, thought)
             # Add metadata for tool calling
+            # Safely get tool_call.id (handle both dict and object access)
+            tool_call_id = getattr(tool_call, 'id', None)
+            if tool_call_id is None and isinstance(tool_call, dict):
+                tool_call_id = tool_call.get('id', f'call_{uuid.uuid4().hex[:16]}')
+            elif tool_call_id is None:
+                tool_call_id = f'call_{uuid.uuid4().hex[:16]}'
+            
             action.tool_call_metadata = ToolCallMetadata(
-                tool_call_id=tool_call.id,
+                tool_call_id=tool_call_id,
                 function_name=function_name,
                 model_response=response,
                 total_calls_in_response=len(tool_calls),

@@ -190,7 +190,7 @@ model = "gpt-4o"
 # ATTENTION: Based on evaluation, enabling native function calling may lead to worse results
 # in some scenarios. Use with caution and consider testing with your specific use case.
 # https://github.com/All-Hands-AI/OpenHands/pull/4711
-native_tool_calling = true
+# native_tool_calling = None
 
 
 # Safety settings for models that support them (e.g., Mistral AI, Gemini)

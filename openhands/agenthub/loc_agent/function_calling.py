@@ -4,6 +4,7 @@ This is similar to the functionality of `CodeActResponseParser`.
 """
 
 import json
+import uuid
 
 from litellm import (
     ChatCompletionToolParam,
@@ -102,22 +103,40 @@ def response_to_actions(
                 
                 function_obj = tool_call.function
                 
-                # Try to access as dict first (for manually created tool calls)
+                # Try multiple methods to access function name and arguments
+                function_name = None
+                function_arguments = None
+                
+                # Method 1: Try dict access
                 if isinstance(function_obj, dict):
                     function_name = function_obj.get('name', '')
                     function_arguments = function_obj.get('arguments', '{}')
-                # Try to access as object with attributes (for litellm-created tool calls)
-                elif hasattr(function_obj, 'name') and hasattr(function_obj, 'arguments'):
-                    function_name = function_obj.name
-                    function_arguments = function_obj.arguments
-                # Fallback: try dict-style access if it supports it
-                elif hasattr(function_obj, 'get'):
+                # Method 2: Try attribute access (for litellm objects)
+                elif hasattr(function_obj, 'name'):
+                    function_name = getattr(function_obj, 'name', '')
+                    function_arguments = getattr(function_obj, 'arguments', '{}')
+                # Method 3: Try dict-style get method
+                elif hasattr(function_obj, 'get') and callable(getattr(function_obj, 'get', None)):
                     function_name = function_obj.get('name', '')
                     function_arguments = function_obj.get('arguments', '{}')
-                else:
+                # Method 4: Try accessing as dict-like object
+                elif hasattr(function_obj, '__getitem__'):
+                    try:
+                        function_name = function_obj['name']
+                        function_arguments = function_obj['arguments']
+                    except (KeyError, TypeError):
+                        pass
+                
+                # Validate we got the values
+                if function_name is None or function_arguments is None:
                     raise RuntimeError(
                         f'Unable to access function name/arguments from tool call. Function type: {type(function_obj)}, value: {function_obj}'
                     )
+                
+                # Ensure function_arguments is a string
+                if not isinstance(function_arguments, str):
+                    import json
+                    function_arguments = json.dumps(function_arguments) if function_arguments else '{}'
                 
                 arguments = json.loads(function_arguments)
             except json.decoder.JSONDecodeError as e:
@@ -156,8 +175,15 @@ def response_to_actions(
             if i == 0:
                 action = combine_thought(action, thought)
             # Add metadata for tool calling
+            # Safely get tool_call.id (handle both dict and object access)
+            tool_call_id = getattr(tool_call, 'id', None)
+            if tool_call_id is None and isinstance(tool_call, dict):
+                tool_call_id = tool_call.get('id', f'call_{uuid.uuid4().hex[:16]}')
+            elif tool_call_id is None:
+                tool_call_id = f'call_{uuid.uuid4().hex[:16]}'
+            
             action.tool_call_metadata = ToolCallMetadata(
-                tool_call_id=tool_call.id,
+                tool_call_id=tool_call_id,
                 function_name=function_name,
                 model_response=response,
                 total_calls_in_response=len(tool_calls),
