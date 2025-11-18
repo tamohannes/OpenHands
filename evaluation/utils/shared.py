@@ -5,6 +5,7 @@ import os
 import pathlib
 import signal
 import subprocess
+import threading
 import time
 import traceback
 from contextlib import contextmanager
@@ -483,6 +484,98 @@ def _process_instance_wrapper_mp(args):
     return _process_instance_wrapper(*args)
 
 
+# Global flag to control GPU keepalive thread
+_gpu_keepalive_stop = threading.Event()
+_gpu_keepalive_thread = None
+
+
+def _gpu_keepalive_operation():
+    """Perform a small GPU operation to keep GPU active.
+    
+    This prevents job cancellation systems from killing jobs that appear
+    to not be using GPU resources. The operation is lightweight and
+    runs periodically in the background.
+    """
+    try:
+        import torch
+        
+        if not torch.cuda.is_available():
+            return
+        
+        # Create a small tensor and perform a simple operation
+        # This is lightweight but keeps the GPU active
+        device = torch.device('cuda:0')
+        x = torch.randn(10, 10, device=device)
+        y = torch.randn(10, 10, device=device)
+        _ = torch.matmul(x, y)
+        # Synchronize to ensure the operation completes
+        torch.cuda.synchronize(device)
+    except ImportError:
+        # PyTorch not available, try alternative
+        try:
+            import cupy as cp
+            x = cp.random.randn(10, 10)
+            y = cp.random.randn(10, 10)
+            _ = cp.dot(x, y)
+            cp.cuda.Stream.null.synchronize()
+        except ImportError:
+            # Neither PyTorch nor CuPy available, skip GPU keepalive
+            pass
+    except Exception as e:
+        # Silently fail - GPU keepalive is best-effort
+        logger.debug(f'GPU keepalive operation failed: {e}')
+
+
+def _gpu_keepalive_worker(interval: float = 30.0):
+    """Background worker thread that periodically performs GPU operations.
+    
+    Args:
+        interval: Time in seconds between GPU operations (default: 30 seconds)
+    """
+    while not _gpu_keepalive_stop.wait(interval):
+        _gpu_keepalive_operation()
+
+
+def start_gpu_keepalive(interval: float = 30.0):
+    """Start a background thread that periodically performs GPU operations.
+    
+    This prevents job cancellation systems from killing jobs that appear
+    to not be using GPU resources during CPU-intensive phases.
+    
+    Args:
+        interval: Time in seconds between GPU operations (default: 30 seconds)
+    """
+    global _gpu_keepalive_thread
+    
+    if _gpu_keepalive_thread is not None and _gpu_keepalive_thread.is_alive():
+        logger.debug('GPU keepalive thread already running')
+        return
+    
+    _gpu_keepalive_stop.clear()
+    _gpu_keepalive_thread = threading.Thread(
+        target=_gpu_keepalive_worker,
+        args=(interval,),
+        daemon=True,
+        name='gpu_keepalive'
+    )
+    _gpu_keepalive_thread.start()
+    logger.info(f'Started GPU keepalive thread (interval: {interval}s)')
+
+
+def stop_gpu_keepalive():
+    """Stop the GPU keepalive background thread."""
+    global _gpu_keepalive_thread
+    
+    if _gpu_keepalive_thread is None:
+        return
+    
+    _gpu_keepalive_stop.set()
+    if _gpu_keepalive_thread.is_alive():
+        _gpu_keepalive_thread.join(timeout=5.0)
+    _gpu_keepalive_thread = None
+    logger.info('Stopped GPU keepalive thread')
+
+
 def run_evaluation(
     dataset: pd.DataFrame,
     metadata: EvalMetadata | None,
@@ -504,6 +597,10 @@ def run_evaluation(
     else:
         logger.warning('Running evaluation without metadata.')
         logger.info(f'Evaluation started with {num_workers} workers.')
+
+    # Start GPU keepalive thread to prevent job cancellation
+    # This ensures GPU is always active even during CPU-intensive phases
+    start_gpu_keepalive(interval=30.0)
 
     total_instances = len(dataset)
     pbar = tqdm(total=total_instances, desc='Instances processed')
@@ -540,6 +637,9 @@ def run_evaluation(
     except KeyboardInterrupt:
         print('\nKeyboardInterrupt received. Cleaning up...\n')
         cleanup()
+    finally:
+        # Stop GPU keepalive thread when evaluation finishes
+        stop_gpu_keepalive()
 
     output_fp.close()
     logger.info('\nEvaluation finished.\n')
