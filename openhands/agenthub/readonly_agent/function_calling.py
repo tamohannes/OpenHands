@@ -171,7 +171,7 @@ def response_to_actions(
     if not tool_calls and content_str:
         # Check for tool call tags in content
         has_tool_call_tags = '<tool_call>' in content_str or '</tool_call>' in content_str
-        has_reasoning_tags = '</think>' in content_str or '</reasoning>' in content_str
+        has_reasoning_tags = '</think>' in content_str or '</think>' in content_str or '</reasoning>' in content_str
         
         logger.debug(f'Checking content for embedded tool calls. Has <tool_call> tags: {has_tool_call_tags}, Has reasoning tags: {has_reasoning_tags}')
         

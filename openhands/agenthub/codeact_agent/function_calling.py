@@ -49,6 +49,109 @@ from openhands.events.tool import ToolCallMetadata
 from openhands.llm.tool_names import TASK_TRACKER_TOOL_NAME
 
 
+def _get_available_tool_names(mcp_tool_names: list[str] | None = None) -> list[str]:
+    """Get a list of all available tool names.
+    
+    This includes both built-in CodeActAgent tools and MCP tools.
+    
+    Args:
+        mcp_tool_names: Optional list of MCP tool names
+        
+    Returns:
+        List of all available tool names
+    """
+    tool_names = [
+        create_cmd_run_tool()['function']['name'],
+        ThinkTool['function']['name'],
+        FinishTool['function']['name'],
+        CondensationRequestTool['function']['name'],
+        BrowserTool['function']['name'],
+        IPythonTool['function']['name'],
+        LLMBasedFileEditTool['function']['name'],
+        create_str_replace_editor_tool()['function']['name'],
+        TASK_TRACKER_TOOL_NAME,
+        'delegate_to_browsing_agent',  # Special case tool
+    ]
+    
+    if mcp_tool_names:
+        tool_names.extend(mcp_tool_names)
+    
+    return tool_names
+
+
+def _fuzzy_match_tool_name(called_name: str, available_tool_names: list[str]) -> str | None:
+    """Try to match a tool name using simple heuristics.
+    
+    Common patterns handled:
+    - Plural vs singular (read_files -> read_file)
+    - Underscore variations (read_file vs readfile)
+    - Common typos and variations
+    
+    Args:
+        called_name: The tool name that was called
+        available_tool_names: List of available tool names
+        
+    Returns:
+        Matched tool name if found, None otherwise
+    """
+    called_lower = called_name.lower()
+    available_lower = [name.lower() for name in available_tool_names]
+    
+    # Exact match (case-insensitive)
+    if called_lower in available_lower:
+        idx = available_lower.index(called_lower)
+        return available_tool_names[idx]
+    
+    # Try removing trailing 's' (plural -> singular)
+    if called_lower.endswith('s') and len(called_lower) > 1:
+        singular = called_lower[:-1]
+        if singular in available_lower:
+            idx = available_lower.index(singular)
+            logger.info(f'Matched tool name "{called_name}" -> "{available_tool_names[idx]}" (plural -> singular)')
+            return available_tool_names[idx]
+    
+    # Try adding trailing 's' (singular -> plural, less common but possible)
+    plural = called_lower + 's'
+    if plural in available_lower:
+        idx = available_lower.index(plural)
+        logger.info(f'Matched tool name "{called_name}" -> "{available_tool_names[idx]}" (singular -> plural)')
+        return available_tool_names[idx]
+    
+    # Try removing underscores
+    no_underscore = called_lower.replace('_', '')
+    for i, avail_lower in enumerate(available_lower):
+        if avail_lower.replace('_', '') == no_underscore:
+            logger.info(f'Matched tool name "{called_name}" -> "{available_tool_names[i]}" (underscore variation)')
+            return available_tool_names[i]
+    
+    # Try adding underscores (simple heuristic: add underscore before last word)
+    # This is less reliable, so we only do it for 2+ word names
+    if '_' not in called_lower and len(called_lower.split()) >= 2:
+        # Try common patterns like "readfile" -> "read_file"
+        # This is a simple heuristic and might not catch all cases
+        words = called_lower.split()
+        if len(words) == 2:
+            with_underscore = f"{words[0]}_{words[1]}"
+            if with_underscore in available_lower:
+                idx = available_lower.index(with_underscore)
+                logger.info(f'Matched tool name "{called_name}" -> "{available_tool_names[idx]}" (added underscore)')
+                return available_tool_names[idx]
+    
+    # Try substring matching (if called name is a substring of available name)
+    # Only if the substring is at least 5 characters to avoid false positives
+    if len(called_lower) >= 5:
+        for i, avail_lower in enumerate(available_lower):
+            if called_lower in avail_lower or avail_lower in called_lower:
+                # Check if it's a reasonable match (not just a common substring)
+                # Require at least 80% character overlap
+                overlap = min(len(called_lower), len(avail_lower))
+                if overlap >= max(len(called_lower), len(avail_lower)) * 0.8:
+                    logger.info(f'Matched tool name "{called_name}" -> "{available_tool_names[i]}" (substring match)')
+                    return available_tool_names[i]
+    
+    return None
+
+
 def combine_thought(action: Action, thought: str) -> Action:
     if not hasattr(action, 'thought'):
         return action
@@ -231,6 +334,7 @@ def extract_reasoning_from_content(content: str) -> tuple[str, str]:
     # Priority order: check for standalone closing tags first (most common case)
     # These tags typically don't have opening tags - everything before them is reasoning
     # The user confirmed that reasoning tags only have closing tags like </think>
+    # Note: Qwen3 thinking models use </think> tag (not </think>)
     standalone_closing_tags = ['</think>', '</reasoning>']
     
     for closing_tag in standalone_closing_tags:
@@ -338,6 +442,7 @@ def response_to_actions(
         # For thinking models: everything before </think> is reasoning
         thought = ''
         reasoning = ''
+        cleaned_content = ''  # Initialize for use in fallback case
         
         if content_str:
             # Extract reasoning first (everything before </think>)
@@ -365,7 +470,7 @@ def response_to_actions(
 
         # Process each tool call to OpenHands action
         for i, tool_call in enumerate(tool_calls):
-            action: Action
+            action: Action | None = None
             logger.debug(f'Tool call in function_calling.py: {tool_call}')
             try:
                 # Handle both dict and object access for function attribute
@@ -408,6 +513,15 @@ def response_to_actions(
                         f'Unable to access function name/arguments from tool call. Function type: {type(function_obj)}, value: {function_obj}, hasattr name: {hasattr(function_obj, "name") if hasattr(function_obj, "__class__") else "N/A"}'
                     )
                 
+                # Try fuzzy matching for tool name before processing
+                # This handles common mistakes like plural vs singular, underscore variations, etc.
+                original_function_name = function_name
+                available_tool_names = _get_available_tool_names(mcp_tool_names)
+                matched_name = _fuzzy_match_tool_name(function_name, available_tool_names)
+                if matched_name and matched_name != function_name:
+                    logger.info(f'Fuzzy matched tool name "{function_name}" -> "{matched_name}"')
+                    function_name = matched_name
+                
                 # Ensure function_arguments is a string
                 if not isinstance(function_arguments, str):
                     function_arguments = json.dumps(function_arguments) if function_arguments else '{}'
@@ -418,236 +532,271 @@ def response_to_actions(
                     f'Failed to parse tool call arguments: {function_arguments}'
                 ) from e
 
-            # ================================================
-            # CmdRunTool (Bash)
-            # ================================================
-
-            if function_name == create_cmd_run_tool()['function']['name']:
-                if 'command' not in arguments:
-                    raise FunctionCallValidationError(
-                        f'Missing required argument "command" in tool call {function_name}'
-                    )
-                # convert is_input to boolean
-                is_input = arguments.get('is_input', 'false') == 'true'
-                action = CmdRunAction(command=arguments['command'], is_input=is_input)
-
-                # Set hard timeout if provided
-                if 'timeout' in arguments:
-                    try:
-                        action.set_hard_timeout(float(arguments['timeout']))
-                    except ValueError as e:
+                # ================================================
+                # CmdRunTool (Bash)
+                # ================================================
+                if function_name == create_cmd_run_tool()['function']['name']:
+                    if 'command' not in arguments:
                         raise FunctionCallValidationError(
-                            f"Invalid float passed to 'timeout' argument: {arguments['timeout']}"
-                        ) from e
-                set_security_risk(action, arguments)
+                            f'Missing required argument "command" in tool call {function_name}'
+                        )
+                    # convert is_input to boolean
+                    is_input = arguments.get('is_input', 'false') == 'true'
+                    action = CmdRunAction(command=arguments['command'], is_input=is_input)
 
-            # ================================================
-            # IPythonTool (Jupyter)
-            # ================================================
-            elif function_name == IPythonTool['function']['name']:
-                if 'code' not in arguments:
-                    raise FunctionCallValidationError(
-                        f'Missing required argument "code" in tool call {function_name}'
-                    )
-                action = IPythonRunCellAction(code=arguments['code'])
-                set_security_risk(action, arguments)
+                    # Set hard timeout if provided
+                    if 'timeout' in arguments:
+                        try:
+                            action.set_hard_timeout(float(arguments['timeout']))
+                        except ValueError as e:
+                            raise FunctionCallValidationError(
+                                f"Invalid float passed to 'timeout' argument: {arguments['timeout']}"
+                            ) from e
+                    set_security_risk(action, arguments)
 
-            # ================================================
-            # AgentDelegateAction (Delegation to another agent)
-            # ================================================
-            elif function_name == 'delegate_to_browsing_agent':
-                action = AgentDelegateAction(
-                    agent='BrowsingAgent',
-                    inputs=arguments,
-                )
+                # ================================================
+                # IPythonTool (Jupyter)
+                # ================================================
+                elif function_name == IPythonTool['function']['name']:
+                    if 'code' not in arguments:
+                        raise FunctionCallValidationError(
+                            f'Missing required argument "code" in tool call {function_name}'
+                        )
+                    action = IPythonRunCellAction(code=arguments['code'])
+                    set_security_risk(action, arguments)
 
-            # ================================================
-            # AgentFinishAction
-            # ================================================
-            elif function_name == FinishTool['function']['name']:
-                action = AgentFinishAction(
-                    final_thought=arguments.get('message', ''),
-                )
+                # ================================================
+                # AgentDelegateAction (Delegation to another agent)
+                # ================================================
+                elif function_name == 'delegate_to_browsing_agent':
+                    action = AgentDelegateAction(
+                        agent='BrowsingAgent',
+                        inputs=arguments,
+                    )
 
-            # ================================================
-            # LLMBasedFileEditTool (LLM-based file editor, deprecated)
-            # ================================================
-            elif function_name == LLMBasedFileEditTool['function']['name']:
-                if 'path' not in arguments:
-                    raise FunctionCallValidationError(
-                        f'Missing required argument "path" in tool call {function_name}'
+                # ================================================
+                # AgentFinishAction
+                # ================================================
+                elif function_name == FinishTool['function']['name']:
+                    action = AgentFinishAction(
+                        final_thought=arguments.get('message', ''),
                     )
-                if 'content' not in arguments:
-                    raise FunctionCallValidationError(
-                        f'Missing required argument "content" in tool call {function_name}'
-                    )
-                action = FileEditAction(
-                    path=arguments['path'],
-                    content=arguments['content'],
-                    start=arguments.get('start', 1),
-                    end=arguments.get('end', -1),
-                    impl_source=arguments.get(
-                        'impl_source', FileEditSource.LLM_BASED_EDIT
-                    ),
-                )
-            elif (
-                function_name
-                == create_str_replace_editor_tool()['function']['name']
-            ):
-                if 'command' not in arguments:
-                    raise FunctionCallValidationError(
-                        f'Missing required argument "command" in tool call {function_name}'
-                    )
-                if 'path' not in arguments:
-                    raise FunctionCallValidationError(
-                        f'Missing required argument "path" in tool call {function_name}'
-                    )
-                path = arguments['path']
-                command = arguments['command']
-                other_kwargs = {
-                    k: v for k, v in arguments.items() if k not in ['command', 'path']
-                }
 
-                if command == 'view':
-                    action = FileReadAction(
-                        path=path,
-                        impl_source=FileReadSource.OH_ACI,
-                        view_range=other_kwargs.get('view_range', None),
+                # ================================================
+                # LLMBasedFileEditTool (LLM-based file editor, deprecated)
+                # ================================================
+                elif function_name == LLMBasedFileEditTool['function']['name']:
+                    if 'path' not in arguments:
+                        raise FunctionCallValidationError(
+                            f'Missing required argument "path" in tool call {function_name}'
+                        )
+                    if 'content' not in arguments:
+                        raise FunctionCallValidationError(
+                            f'Missing required argument "content" in tool call {function_name}'
+                        )
+                    action = FileEditAction(
+                        path=arguments['path'],
+                        content=arguments['content'],
+                        start=arguments.get('start', 1),
+                        end=arguments.get('end', -1),
+                        impl_source=arguments.get(
+                            'impl_source', FileEditSource.LLM_BASED_EDIT
+                        ),
+                    )
+                elif (
+                    function_name
+                    == create_str_replace_editor_tool()['function']['name']
+                ):
+                    if 'command' not in arguments:
+                        raise FunctionCallValidationError(
+                            f'Missing required argument "command" in tool call {function_name}'
+                        )
+                    if 'path' not in arguments:
+                        raise FunctionCallValidationError(
+                            f'Missing required argument "path" in tool call {function_name}'
+                        )
+                    path = arguments['path']
+                    command = arguments['command']
+                    other_kwargs = {
+                        k: v for k, v in arguments.items() if k not in ['command', 'path']
+                    }
+
+                    if command == 'view':
+                        action = FileReadAction(
+                            path=path,
+                            impl_source=FileReadSource.OH_ACI,
+                            view_range=other_kwargs.get('view_range', None),
+                        )
+                    else:
+                        if 'view_range' in other_kwargs:
+                            # Remove view_range from other_kwargs since it is not needed for FileEditAction
+                            other_kwargs.pop('view_range')
+
+                        # Filter out unexpected arguments
+                        valid_kwargs_for_editor = {}
+                        # Get valid parameters from the str_replace_editor tool definition
+                        str_replace_editor_tool = create_str_replace_editor_tool()
+                        valid_params = set(
+                            str_replace_editor_tool['function']['parameters'][
+                                'properties'
+                            ].keys()
+                        )
+
+                        for key, value in other_kwargs.items():
+                            if key in valid_params:
+                                # security_risk is valid but should NOT be part of editor kwargs
+                                if key != 'security_risk':
+                                    valid_kwargs_for_editor[key] = value
+                            else:
+                                raise FunctionCallValidationError(
+                                    f'Unexpected argument {key} in tool call {function_name}. Allowed arguments are: {valid_params}'
+                                )
+
+                        action = FileEditAction(
+                            path=path,
+                            command=command,
+                            impl_source=FileEditSource.OH_ACI,
+                            **valid_kwargs_for_editor,
+                        )
+
+                    set_security_risk(action, arguments)
+                # ================================================
+                # AgentThinkAction
+                # ================================================
+                elif function_name == ThinkTool['function']['name']:
+                    action = AgentThinkAction(thought=arguments.get('thought', ''))
+
+                # ================================================
+                # CondensationRequestAction
+                # ================================================
+                elif function_name == CondensationRequestTool['function']['name']:
+                    action = CondensationRequestAction()
+
+                # ================================================
+                # BrowserTool
+                # ================================================
+                elif function_name == BrowserTool['function']['name']:
+                    if 'code' not in arguments:
+                        raise FunctionCallValidationError(
+                            f'Missing required argument "code" in tool call {function_name}'
+                        )
+                    action = BrowseInteractiveAction(browser_actions=arguments['code'])
+                    set_security_risk(action, arguments)
+
+                # ================================================
+                # TaskTrackingAction
+                # ================================================
+                elif function_name == TASK_TRACKER_TOOL_NAME:
+                    if 'command' not in arguments:
+                        raise FunctionCallValidationError(
+                            f'Missing required argument "command" in tool call {function_name}'
+                        )
+                    if arguments['command'] == 'plan' and 'task_list' not in arguments:
+                        raise FunctionCallValidationError(
+                            f'Missing required argument "task_list" for "plan" command in tool call {function_name}'
+                        )
+
+                    raw_task_list = arguments.get('task_list', [])
+                    if not isinstance(raw_task_list, list):
+                        raise FunctionCallValidationError(
+                            f'Invalid format for "task_list". Expected a list but got {type(raw_task_list)}.'
+                        )
+
+                    # Normalize task_list to ensure it's always a list of dictionaries
+                    normalized_task_list = []
+                    for i, task in enumerate(raw_task_list):
+                        if isinstance(task, dict):
+                            # Task is already in correct format, ensure required fields exist
+                            normalized_task = {
+                                'id': task.get('id', f'task-{i + 1}'),
+                                'title': task.get('title', 'Untitled task'),
+                                'status': task.get('status', 'todo'),
+                                'notes': task.get('notes', ''),
+                            }
+                        else:
+                            # Unexpected format, raise validation error
+                            logger.warning(
+                                f'Unexpected task format in task_list: {type(task)} - {task}'
+                            )
+                            raise FunctionCallValidationError(
+                                f'Unexpected task format in task_list: {type(task)}. Each task shoud be a dictionary.'
+                            )
+                        normalized_task_list.append(normalized_task)
+
+                    action = TaskTrackingAction(
+                        command=arguments['command'],
+                        task_list=normalized_task_list,
+                    )
+
+                # ================================================
+                # MCPAction (MCP)
+                # ================================================
+                elif mcp_tool_names and function_name in mcp_tool_names:
+                    action = MCPAction(
+                        name=function_name,
+                        arguments=arguments,
                     )
                 else:
-                    if 'view_range' in other_kwargs:
-                        # Remove view_range from other_kwargs since it is not needed for FileEditAction
-                        other_kwargs.pop('view_range')
-
-                    # Filter out unexpected arguments
-                    valid_kwargs_for_editor = {}
-                    # Get valid parameters from the str_replace_editor tool definition
-                    str_replace_editor_tool = create_str_replace_editor_tool()
-                    valid_params = set(
-                        str_replace_editor_tool['function']['parameters'][
-                            'properties'
-                        ].keys()
+                    # Tool name not found - fuzzy matching was already attempted above
+                    # Get available tool names for error message
+                    available_tool_names = _get_available_tool_names(mcp_tool_names)
+                    available_tool_names_str = ', '.join(available_tool_names[:10])
+                    if len(available_tool_names) > 10:
+                        available_tool_names_str += f', ... ({len(available_tool_names)} total)'
+                    raise FunctionCallNotExistsError(
+                        f'Tool {function_name} is not registered. (arguments: {arguments}). '
+                        f'Available tools: {available_tool_names_str}. '
+                        f'Please check the tool name and retry with an existing tool.'
                     )
 
-                    for key, value in other_kwargs.items():
-                        if key in valid_params:
-                            # security_risk is valid but should NOT be part of editor kwargs
-                            if key != 'security_risk':
-                                valid_kwargs_for_editor[key] = value
-                        else:
-                            raise FunctionCallValidationError(
-                                f'Unexpected argument {key} in tool call {function_name}. Allowed arguments are: {valid_params}'
-                            )
-
-                    action = FileEditAction(
-                        path=path,
-                        command=command,
-                        impl_source=FileEditSource.OH_ACI,
-                        **valid_kwargs_for_editor,
-                    )
-
-                set_security_risk(action, arguments)
-            # ================================================
-            # AgentThinkAction
-            # ================================================
-            elif function_name == ThinkTool['function']['name']:
-                action = AgentThinkAction(thought=arguments.get('thought', ''))
-
-            # ================================================
-            # CondensationRequestAction
-            # ================================================
-            elif function_name == CondensationRequestTool['function']['name']:
-                action = CondensationRequestAction()
-
-            # ================================================
-            # BrowserTool
-            # ================================================
-            elif function_name == BrowserTool['function']['name']:
-                if 'code' not in arguments:
-                    raise FunctionCallValidationError(
-                        f'Missing required argument "code" in tool call {function_name}'
-                    )
-                action = BrowseInteractiveAction(browser_actions=arguments['code'])
-                set_security_risk(action, arguments)
-
-            # ================================================
-            # TaskTrackingAction
-            # ================================================
-            elif function_name == TASK_TRACKER_TOOL_NAME:
-                if 'command' not in arguments:
-                    raise FunctionCallValidationError(
-                        f'Missing required argument "command" in tool call {function_name}'
-                    )
-                if arguments['command'] == 'plan' and 'task_list' not in arguments:
-                    raise FunctionCallValidationError(
-                        f'Missing required argument "task_list" for "plan" command in tool call {function_name}'
-                    )
-
-                raw_task_list = arguments.get('task_list', [])
-                if not isinstance(raw_task_list, list):
-                    raise FunctionCallValidationError(
-                        f'Invalid format for "task_list". Expected a list but got {type(raw_task_list)}.'
-                    )
-
-                # Normalize task_list to ensure it's always a list of dictionaries
-                normalized_task_list = []
-                for i, task in enumerate(raw_task_list):
-                    if isinstance(task, dict):
-                        # Task is already in correct format, ensure required fields exist
-                        normalized_task = {
-                            'id': task.get('id', f'task-{i + 1}'),
-                            'title': task.get('title', 'Untitled task'),
-                            'status': task.get('status', 'todo'),
-                            'notes': task.get('notes', ''),
-                        }
-                    else:
-                        # Unexpected format, raise validation error
-                        logger.warning(
-                            f'Unexpected task format in task_list: {type(task)} - {task}'
-                        )
-                        raise FunctionCallValidationError(
-                            f'Unexpected task format in task_list: {type(task)}. Each task shoud be a dictionary.'
-                        )
-                    normalized_task_list.append(normalized_task)
-
-                action = TaskTrackingAction(
-                    command=arguments['command'],
-                    task_list=normalized_task_list,
+                # We only add thought to the first action, and only if we didn't create a separate think action
+                # (for thinking models, reasoning is already in the separate think action)
+                # Note: reasoning_stripped is computed above before the loop
+                if i == 0 and not (tool_calls_extracted_from_content and reasoning_stripped):
+                    action = combine_thought(action, thought)
+                # Add metadata for tool calling
+                # Safely get tool_call.id (handle both dict and object access)
+                tool_call_id = getattr(tool_call, 'id', None)
+                if tool_call_id is None and isinstance(tool_call, dict):
+                    tool_call_id = tool_call.get('id', f'call_{uuid.uuid4().hex[:16]}')
+                elif tool_call_id is None:
+                    tool_call_id = f'call_{uuid.uuid4().hex[:16]}'
+                
+                action.tool_call_metadata = ToolCallMetadata(
+                    tool_call_id=tool_call_id,
+                    function_name=function_name,
+                    model_response=response,
+                    total_calls_in_response=len(tool_calls),
                 )
-
-            # ================================================
-            # MCPAction (MCP)
-            # ================================================
-            elif mcp_tool_names and function_name in mcp_tool_names:
-                action = MCPAction(
-                    name=function_name,
-                    arguments=arguments,
-                )
-            else:
-                raise FunctionCallNotExistsError(
-                    f'Tool {function_name} is not registered. (arguments: {arguments}). Please check the tool name and retry with an existing tool.'
-                )
-
-            # We only add thought to the first action, and only if we didn't create a separate think action
-            # (for thinking models, reasoning is already in the separate think action)
-            # Note: reasoning_stripped is computed above before the loop
-            if i == 0 and not (tool_calls_extracted_from_content and reasoning_stripped):
-                action = combine_thought(action, thought)
-            # Add metadata for tool calling
-            # Safely get tool_call.id (handle both dict and object access)
-            tool_call_id = getattr(tool_call, 'id', None)
-            if tool_call_id is None and isinstance(tool_call, dict):
-                tool_call_id = tool_call.get('id', f'call_{uuid.uuid4().hex[:16]}')
-            elif tool_call_id is None:
-                tool_call_id = f'call_{uuid.uuid4().hex[:16]}'
-            
-            action.tool_call_metadata = ToolCallMetadata(
-                tool_call_id=tool_call_id,
-                function_name=function_name,
-                model_response=response,
-                total_calls_in_response=len(tool_calls),
+                actions.append(action)
+            except (FunctionCallNotExistsError, FunctionCallValidationError) as e:
+                # Log the error but continue processing other tool calls
+                logger.error(f'Failed to process tool call {i+1}/{len(tool_calls)}: {e}')
+                logger.error(f'Tool call details: function_name={function_name if "function_name" in locals() else "unknown"}, arguments={arguments if "arguments" in locals() else "unknown"}')
+                # Don't append action, but continue to next tool call
+                continue
+            except Exception as e:
+                # Catch any other unexpected errors
+                logger.error(f'Unexpected error processing tool call {i+1}/{len(tool_calls)}: {e}')
+                import traceback
+                logger.error(traceback.format_exc())
+                # Don't append action, but continue to next tool call
+                continue
+        
+        # Special case: If we extracted tool calls from content but ALL of them failed,
+        # and we don't have a think action, create a MessageAction with the cleaned content
+        # This ensures we always have at least one action for thinking models
+        if tool_calls_extracted_from_content and len(actions) == 0:
+            logger.warning('All extracted tool calls failed to process. Creating MessageAction with cleaned content.')
+            # Use the cleaned content (after removing tool_call tags) as the message
+            # Prefer thought (which is cleaned_content), then cleaned_content, then raw content_str
+            message_content = thought if thought else (cleaned_content if cleaned_content else content_str)
+            fallback_action = MessageAction(
+                content=message_content if message_content else str(assistant_msg.content) if assistant_msg.content else '',
+                wait_for_response=True,
             )
-            actions.append(action)
+            fallback_action.response_id = response.id
+            actions.append(fallback_action)
     else:
         actions.append(
             MessageAction(
@@ -663,5 +812,16 @@ def response_to_actions(
     for action in actions:
         action.response_id = response.id
 
+    # Safety check: ensure we always have at least one action
+    # This should never happen, but if it does, create a MessageAction as fallback
+    if len(actions) == 0:
+        logger.warning('No actions were created from response, creating fallback MessageAction')
+        fallback_action = MessageAction(
+            content=str(assistant_msg.content) if assistant_msg.content else '',
+            wait_for_response=True,
+        )
+        fallback_action.response_id = response.id
+        actions.append(fallback_action)
+    
     assert len(actions) >= 1
     return actions
