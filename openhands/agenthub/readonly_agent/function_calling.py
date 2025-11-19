@@ -22,6 +22,7 @@ from openhands.agenthub.codeact_agent.tools import (
     FinishTool,
     ThinkTool,
 )
+from openhands.llm.tool_names import STR_REPLACE_EDITOR_TOOL_NAME
 from openhands.agenthub.readonly_agent.tools import (
     GlobTool,
     GrepTool,
@@ -150,56 +151,66 @@ def response_to_actions(
     # Track if tool calls were extracted from content (thinking model case)
     tool_calls_extracted_from_content = False
     
+    # Get content string for processing
+    content_str = ''
+    if isinstance(assistant_msg.content, str):
+        content_str = assistant_msg.content
+    elif isinstance(assistant_msg.content, list):
+        for msg in assistant_msg.content:
+            if isinstance(msg, dict) and msg.get('type') == 'text':
+                content_str += msg.get('text', '')
+            elif isinstance(msg, str):
+                content_str += msg
+    
+    logger.debug(f'Content type: {type(assistant_msg.content)}, Content length: {len(content_str)}')
+    logger.debug(f'Standard tool_calls field: {len(tool_calls) if tool_calls else 0} tool call(s)')
+    
     # If no tool calls in standard field, check content for embedded tool calls
     # This handles thinking models that output tool calls in content
-    if not tool_calls:
-        content_str = ''
-        if isinstance(assistant_msg.content, str):
-            content_str = assistant_msg.content
-        elif isinstance(assistant_msg.content, list):
-            for msg in assistant_msg.content:
-                if isinstance(msg, dict) and msg.get('type') == 'text':
-                    content_str += msg.get('text', '')
-                elif isinstance(msg, str):
-                    content_str += msg
+    # Format: [reasoning]</think><tool_call>{json}</tool_call>
+    if not tool_calls and content_str:
+        # Check for tool call tags in content
+        has_tool_call_tags = '<tool_call>' in content_str or '</tool_call>' in content_str
+        has_reasoning_tags = '</think>' in content_str or '</reasoning>' in content_str
         
-        if content_str:
-            extracted_tool_calls = extract_tool_calls_from_content(content_str)
-            if extracted_tool_calls:
-                tool_calls = extracted_tool_calls
-                tool_calls_extracted_from_content = True
-                logger.debug(f'Extracted {len(tool_calls)} tool call(s) from content')
+        logger.debug(f'Checking content for embedded tool calls. Has <tool_call> tags: {has_tool_call_tags}, Has reasoning tags: {has_reasoning_tags}')
+        
+        if has_tool_call_tags:
+            logger.debug(f'Content preview (first 500 chars): {content_str[:500]}...')
+            logger.debug(f'Content preview (last 500 chars): ...{content_str[-500:]}')
+        
+        extracted_tool_calls = extract_tool_calls_from_content(content_str)
+        if extracted_tool_calls:
+            tool_calls = extracted_tool_calls
+            tool_calls_extracted_from_content = True
+            logger.info(f'✅ Extracted {len(tool_calls)} tool call(s) from content')
+            for i, tc in enumerate(tool_calls):
+                if hasattr(tc, 'function'):
+                    func = tc.function
+                    if isinstance(func, dict):
+                        logger.info(f'  Tool call {i+1}: name={func.get("name")}, args={func.get("arguments", "")[:100]}...')
+                    elif hasattr(func, 'name'):
+                        logger.info(f'  Tool call {i+1}: name={func.name}, args={func.arguments[:100] if hasattr(func, "arguments") else "N/A"}...')
+        else:
+            # Log if we expected to find tool calls but didn't
+            if has_tool_call_tags:
+                logger.warning('❌ Found <tool_call> tags in content but failed to extract tool calls')
+                logger.warning(f'Content around tags: {content_str[max(0, content_str.find("<tool_call>")-100):content_str.find("</tool_call>")+100]}')
 
     if tool_calls:
         # Check if there's assistant_msg.content. If so, add it to the thought
         # Extract reasoning traces if present
+        # For thinking models: everything before </think> is reasoning
         thought = ''
         reasoning = ''
-        if isinstance(assistant_msg.content, str):
-            cleaned_content, reasoning = extract_reasoning_from_content(assistant_msg.content)
+        
+        if content_str:
+            # Extract reasoning first (everything before </think>)
+            cleaned_content, reasoning = extract_reasoning_from_content(content_str)
             # Remove tool_call tags if they were extracted from content
             if tool_calls_extracted_from_content:
                 cleaned_content = remove_tool_call_tags(cleaned_content)
             thought = cleaned_content
-        elif isinstance(assistant_msg.content, list):
-            for msg in assistant_msg.content:
-                if isinstance(msg, dict) and msg.get('type') == 'text':
-                    text_content = msg.get('text', '')
-                    cleaned_text, extracted_reasoning = extract_reasoning_from_content(text_content)
-                    # Remove tool_call tags if they were extracted from content
-                    if tool_calls_extracted_from_content:
-                        cleaned_text = remove_tool_call_tags(cleaned_text)
-                    thought += cleaned_text
-                    if extracted_reasoning:
-                        reasoning += extracted_reasoning + '\n'
-                elif isinstance(msg, str):
-                    cleaned_text, extracted_reasoning = extract_reasoning_from_content(msg)
-                    # Remove tool_call tags if they were extracted from content
-                    if tool_calls_extracted_from_content:
-                        cleaned_text = remove_tool_call_tags(cleaned_text)
-                    thought += cleaned_text
-                    if extracted_reasoning:
-                        reasoning += extracted_reasoning + '\n'
         
         # Strip reasoning to check if it's non-empty
         reasoning_stripped = reasoning.strip() if reasoning else ''
@@ -289,6 +300,39 @@ def response_to_actions(
                     impl_source=FileReadSource.OH_ACI,
                     view_range=arguments.get('view_range', None),
                 )
+
+            # ================================================
+            # str_replace_editor with command='view' (READ-ONLY mapping)
+            # ================================================
+            # Some models (especially thinking models) may output str_replace_editor
+            # even when using ReadOnlyAgent. We map the 'view' command to FileReadAction.
+            elif function_name == STR_REPLACE_EDITOR_TOOL_NAME:
+                if 'command' not in arguments:
+                    raise FunctionCallValidationError(
+                        f'Missing required argument "command" in tool call {function_name}'
+                    )
+                if 'path' not in arguments:
+                    raise FunctionCallValidationError(
+                        f'Missing required argument "path" in tool call {function_name}'
+                    )
+                
+                command = arguments['command']
+                path = arguments['path']
+                
+                # Only allow 'view' command in ReadOnlyAgent (read-only operation)
+                if command == 'view':
+                    action = FileReadAction(
+                        path=path,
+                        impl_source=FileReadSource.OH_ACI,
+                        view_range=arguments.get('view_range', None),
+                    )
+                    logger.debug(f'Mapped str_replace_editor with command=view to FileReadAction for path: {path}')
+                else:
+                    # Reject any write operations (create, str_replace, insert, undo_edit)
+                    raise FunctionCallValidationError(
+                        f'ReadOnlyAgent does not support str_replace_editor command "{command}". '
+                        f'Only "view" command is allowed. Use CodeActAgent for file editing operations.'
+                    )
 
             # ================================================
             # AgentThinkAction

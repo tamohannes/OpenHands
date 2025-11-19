@@ -59,6 +59,31 @@ def combine_thought(action: Action, thought: str) -> Action:
     return action
 
 
+def remove_tool_call_tags(content: str) -> str:
+    """Remove <tool_call>...</tool_call> tags from content.
+    
+    This is used after extracting tool calls from thinking model responses
+    to ensure the tool_call tags don't appear in message content.
+    
+    Args:
+        content: The content string that may contain <tool_call> tags
+        
+    Returns:
+        Content with all <tool_call> tags removed
+    """
+    if not content or not isinstance(content, str):
+        return content
+    
+    # Pattern to match <tool_call>...</tool_call> tags (handles multi-line)
+    pattern = r'<tool_call>\s*.*?\s*</tool_call>'
+    cleaned_content = re.sub(pattern, '', content, flags=re.DOTALL)
+    
+    # Clean up extra whitespace
+    cleaned_content = re.sub(r'\n\s*\n', '\n', cleaned_content).strip()
+    
+    return cleaned_content
+
+
 def set_security_risk(action: Action, arguments: dict) -> None:
     """Set the security risk level for the action."""
 
@@ -80,6 +105,11 @@ def extract_tool_calls_from_content(content: str) -> list[ChatCompletionMessageT
     field within <tool_call> tags rather than in the tool_calls field. This function
     parses those embedded tool calls and converts them to ChatCompletionMessageToolCall format.
     
+    Expected format:
+        <tool_call>
+        {"name": "tool_name", "arguments": {...}}
+        </tool_call>
+    
     Args:
         content: The content string that may contain embedded tool calls
         
@@ -93,33 +123,62 @@ def extract_tool_calls_from_content(content: str) -> list[ChatCompletionMessageT
     
     # Pattern to match <tool_call>...</tool_call> tags
     # This handles both single-line and multi-line tool calls
+    # Use non-greedy matching with DOTALL flag to handle multi-line JSON
     pattern = r'<tool_call>\s*(.*?)\s*</tool_call>'
-    matches = re.finditer(pattern, content, re.DOTALL)
+    matches = list(re.finditer(pattern, content, re.DOTALL))
     
-    for match in matches:
+    if not matches:
+        # Check if tags exist but pattern didn't match (might be malformed)
+        if '<tool_call>' in content or '</tool_call>' in content:
+            logger.debug('Found <tool_call> tags but pattern did not match')
+        return []
+    
+    logger.debug(f'Found {len(matches)} potential tool call(s) in content')
+    
+    for i, match in enumerate(matches):
         tool_call_content = match.group(1).strip()
         if not tool_call_content:
+            logger.warning(f'Tool call {i+1} has empty content between tags')
             continue
-            
+        
         try:
             # Parse the JSON tool call data
-            tool_call_data = json.loads(tool_call_content)
+            # Try to parse as-is first
+            try:
+                tool_call_data = json.loads(tool_call_content)
+            except json.JSONDecodeError:
+                # Sometimes the JSON might have extra whitespace or newlines
+                # Try cleaning it up
+                cleaned = tool_call_content.strip()
+                # Remove any leading/trailing whitespace and newlines
+                cleaned = re.sub(r'^\s+|\s+$', '', cleaned, flags=re.MULTILINE)
+                tool_call_data = json.loads(cleaned)
             
             # Extract name and arguments
             tool_name = tool_call_data.get('name', '')
             tool_arguments = tool_call_data.get('arguments', {})
             
+            # Handle case where arguments might be missing (default to empty dict)
+            if tool_arguments is None:
+                tool_arguments = {}
+            
             # Convert arguments to JSON string if it's a dict
             if isinstance(tool_arguments, dict):
                 arguments_str = json.dumps(tool_arguments)
             elif isinstance(tool_arguments, str):
-                arguments_str = tool_arguments
+                # If it's already a string, try to validate it's valid JSON
+                try:
+                    json.loads(tool_arguments)  # Validate it's valid JSON
+                    arguments_str = tool_arguments
+                except json.JSONDecodeError:
+                    logger.warning(f'Tool arguments string is not valid JSON, wrapping in object')
+                    arguments_str = json.dumps({'raw': tool_arguments})
             else:
-                logger.warning(f'Unexpected tool arguments type: {type(tool_arguments)}')
-                continue
+                logger.warning(f'Unexpected tool arguments type: {type(tool_arguments)}, converting to string')
+                arguments_str = json.dumps(str(tool_arguments))
             
             if not tool_name:
-                logger.warning('Tool call missing name field')
+                logger.warning(f'Tool call {i+1} missing name field. Data: {tool_call_data}')
                 continue
             
             # Create a ChatCompletionMessageToolCall object
@@ -132,13 +191,15 @@ def extract_tool_calls_from_content(content: str) -> list[ChatCompletionMessageT
                 },
             )
             tool_calls.append(tool_call)
-            logger.debug(f'Extracted embedded tool call: {tool_name}')
+            logger.info(f'Extracted embedded tool call {i+1}: {tool_name} with arguments: {arguments_str[:100]}...')
             
         except json.JSONDecodeError as e:
-            logger.warning(f'Failed to parse tool call JSON: {tool_call_content[:100]}... Error: {e}')
+            logger.error(f'Failed to parse tool call {i+1} JSON. Content (first 200 chars): {tool_call_content[:200]}... Error: {e}')
             continue
         except Exception as e:
-            logger.warning(f'Error extracting tool call: {e}')
+            logger.error(f'Error extracting tool call {i+1}: {e}. Content (first 200 chars): {tool_call_content[:200]}...')
+            import traceback
+            logger.debug(traceback.format_exc())
             continue
     
     return tool_calls
@@ -147,8 +208,13 @@ def extract_tool_calls_from_content(content: str) -> list[ChatCompletionMessageT
 def extract_reasoning_from_content(content: str) -> tuple[str, str]:
     """Extract reasoning traces from content and return cleaned content and reasoning.
     
-    Thinking models may include reasoning traces in tags like <think> or <think>.
-    This function extracts the reasoning and returns both the cleaned content and the reasoning text.
+    Thinking models output reasoning traces with only closing tags (no opening tags).
+    Everything before the closing tag is considered reasoning.
+    
+    Expected format:
+        [reasoning text - everything before the closing tag]
+        </think>
+        [rest of content, possibly with tool calls]
     
     Args:
         content: The content string that may contain reasoning traces
@@ -159,48 +225,46 @@ def extract_reasoning_from_content(content: str) -> tuple[str, str]:
     if not content or not isinstance(content, str):
         return content, ''
     
-    reasoning_parts = []
+    reasoning = ''
     cleaned_content = content
     
-    # Pattern to match reasoning tags: <think>, <reasoning>, <think>, etc.
-    # Handle both paired tags and standalone closing tags
-    reasoning_patterns = [
-        r'<think>(.*?)</think>',
-        r'<reasoning>(.*?)</reasoning>',
-        r'<think>(.*?)</think>',
-    ]
+    # Priority order: check for standalone closing tags first (most common case)
+    # These tags typically don't have opening tags - everything before them is reasoning
+    # The user confirmed that reasoning tags only have closing tags like </think>
+    standalone_closing_tags = ['</think>', '</reasoning>']
     
-    # First, try to match paired tags
-    for pattern in reasoning_patterns:
-        matches = list(re.finditer(pattern, cleaned_content, re.DOTALL))
-        for match in matches:
-            reasoning_text = match.group(1).strip()
-            if reasoning_text:
-                reasoning_parts.append(reasoning_text)
-            # Remove the reasoning tag from content
-            cleaned_content = cleaned_content.replace(match.group(0), '')
-    
-    # Handle standalone closing tags (e.g., </think> or </think> without opening tag)
-    # Extract everything before the closing tag as reasoning
-    standalone_closing_tags = ['</think>', '</reasoning>', '</think>']
-    corresponding_openings = ['<think>', '<reasoning>', '<think>']
-    
-    for closing_tag, opening_tag in zip(standalone_closing_tags, corresponding_openings):
+    for closing_tag in standalone_closing_tags:
         if closing_tag in cleaned_content:
-            # Check if there's a matching opening tag
-            has_opening = opening_tag in cleaned_content
-            if not has_opening:
-                # Standalone closing tag - everything before it is reasoning
-                idx = cleaned_content.find(closing_tag)
-                if idx > 0:
-                    # Everything before the closing tag is reasoning
-                    reasoning_text = cleaned_content[:idx].strip()
-                    if reasoning_text:
-                        reasoning_parts.append(reasoning_text)
-                    # Remove everything up to and including the closing tag
-                    cleaned_content = cleaned_content[idx + len(closing_tag):].strip()
+            idx = cleaned_content.find(closing_tag)
+            if idx > 0:
+                # Everything before the closing tag is reasoning
+                reasoning = cleaned_content[:idx].strip()
+                # Remove everything up to and including the closing tag
+                cleaned_content = cleaned_content[idx + len(closing_tag):].strip()
+                logger.debug(f'Extracted reasoning from standalone {closing_tag} tag (length: {len(reasoning)})')
+                break  # Only process the first matching closing tag
     
-    reasoning = '\n'.join(reasoning_parts).strip()
+    # Also handle paired tags if they exist (less common but possible)
+    # This is a fallback in case some models use paired tags
+    if not reasoning:
+        reasoning_patterns = [
+            (r'<think>(.*?)</think>', '</think>'),
+            (r'<reasoning>(.*?)</reasoning>', '</reasoning>'),
+            (r'<think>(.*?)</think>', '</think>'),
+        ]
+        
+        for pattern, closing_tag in reasoning_patterns:
+            matches = list(re.finditer(pattern, cleaned_content, re.DOTALL))
+            for match in matches:
+                reasoning_text = match.group(1).strip()
+                if reasoning_text:
+                    reasoning = reasoning_text
+                    # Remove the reasoning tag from content
+                    cleaned_content = cleaned_content.replace(match.group(0), '')
+                    logger.debug(f'Extracted reasoning from paired tags with {closing_tag} (length: {len(reasoning)})')
+                    break
+            if reasoning:
+                break
     
     # Clean up extra whitespace
     cleaned_content = re.sub(r'\n\s*\n', '\n', cleaned_content).strip()
@@ -219,50 +283,85 @@ def response_to_actions(
     # Get tool calls from the standard tool_calls field
     tool_calls = getattr(assistant_msg, 'tool_calls', None) or []
     
+    # Track if tool calls were extracted from content (thinking model case)
+    tool_calls_extracted_from_content = False
+    
+    # Get content string for processing
+    content_str = ''
+    if isinstance(assistant_msg.content, str):
+        content_str = assistant_msg.content
+    elif isinstance(assistant_msg.content, list):
+        for msg in assistant_msg.content:
+            if isinstance(msg, dict) and msg.get('type') == 'text':
+                content_str += msg.get('text', '')
+            elif isinstance(msg, str):
+                content_str += msg
+    
+    logger.debug(f'Content type: {type(assistant_msg.content)}, Content length: {len(content_str)}')
+    logger.debug(f'Standard tool_calls field: {len(tool_calls) if tool_calls else 0} tool call(s)')
+    
     # If no tool calls in standard field, check content for embedded tool calls
     # This handles thinking models that output tool calls in content
-    if not tool_calls:
-        content_str = ''
-        if isinstance(assistant_msg.content, str):
-            content_str = assistant_msg.content
-        elif isinstance(assistant_msg.content, list):
-            for msg in assistant_msg.content:
-                if isinstance(msg, dict) and msg.get('type') == 'text':
-                    content_str += msg.get('text', '')
-                elif isinstance(msg, str):
-                    content_str += msg
+    # Format: [reasoning]</think><tool_call>{json}</tool_call>
+    if not tool_calls and content_str:
+        # Check for tool call tags in content
+        has_tool_call_tags = '<tool_call>' in content_str or '</tool_call>' in content_str
+        has_reasoning_tags = '</think>' in content_str or '</reasoning>' in content_str
         
-        if content_str:
-            extracted_tool_calls = extract_tool_calls_from_content(content_str)
-            if extracted_tool_calls:
-                tool_calls = extracted_tool_calls
-                logger.debug(f'Extracted {len(tool_calls)} tool call(s) from content')
+        logger.debug(f'Checking content for embedded tool calls. Has <tool_call> tags: {has_tool_call_tags}, Has reasoning tags: {has_reasoning_tags}')
+        
+        if has_tool_call_tags:
+            logger.debug(f'Content preview (first 500 chars): {content_str[:500]}...')
+            logger.debug(f'Content preview (last 500 chars): ...{content_str[-500:]}')
+        
+        extracted_tool_calls = extract_tool_calls_from_content(content_str)
+        if extracted_tool_calls:
+            tool_calls = extracted_tool_calls
+            tool_calls_extracted_from_content = True
+            logger.info(f'✅ Extracted {len(tool_calls)} tool call(s) from content')
+            for i, tc in enumerate(tool_calls):
+                if hasattr(tc, 'function'):
+                    func = tc.function
+                    if isinstance(func, dict):
+                        logger.info(f'  Tool call {i+1}: name={func.get("name")}, args={func.get("arguments", "")[:100]}...')
+                    elif hasattr(func, 'name'):
+                        logger.info(f'  Tool call {i+1}: name={func.name}, args={func.arguments[:100] if hasattr(func, "arguments") else "N/A"}...')
+        else:
+            # Log if we expected to find tool calls but didn't
+            if has_tool_call_tags:
+                logger.warning('❌ Found <tool_call> tags in content but failed to extract tool calls')
+                logger.warning(f'Content around tags: {content_str[max(0, content_str.find("<tool_call>")-100):content_str.find("</tool_call>")+100]}')
     
     if tool_calls:
         # Check if there's assistant_msg.content. If so, add it to the thought
         # Extract reasoning traces if present
+        # For thinking models: everything before </think> is reasoning
         thought = ''
         reasoning = ''
-        if isinstance(assistant_msg.content, str):
-            cleaned_content, reasoning = extract_reasoning_from_content(assistant_msg.content)
-            thought = cleaned_content
-        elif isinstance(assistant_msg.content, list):
-            for msg in assistant_msg.content:
-                if isinstance(msg, dict) and msg.get('type') == 'text':
-                    text_content = msg.get('text', '')
-                    cleaned_text, extracted_reasoning = extract_reasoning_from_content(text_content)
-                    thought += cleaned_text
-                    if extracted_reasoning:
-                        reasoning += extracted_reasoning + '\n'
-                elif isinstance(msg, str):
-                    cleaned_text, extracted_reasoning = extract_reasoning_from_content(msg)
-                    thought += cleaned_text
-                    if extracted_reasoning:
-                        reasoning += extracted_reasoning + '\n'
         
-        # Combine reasoning with thought if present
-        if reasoning:
-            thought = f'{reasoning}\n{thought}' if thought else reasoning
+        if content_str:
+            # Extract reasoning first (everything before </think>)
+            cleaned_content, reasoning = extract_reasoning_from_content(content_str)
+            # Remove tool_call tags if they were extracted from content
+            if tool_calls_extracted_from_content:
+                cleaned_content = remove_tool_call_tags(cleaned_content)
+            thought = cleaned_content
+        
+        # Strip reasoning to check if it's non-empty
+        reasoning_stripped = reasoning.strip() if reasoning else ''
+        
+        # For thinking models: if reasoning exists and tool calls were extracted from content,
+        # create a separate AgentThinkAction as the first action
+        if reasoning_stripped and tool_calls_extracted_from_content:
+            think_action = AgentThinkAction(thought=reasoning_stripped)
+            think_action.response_id = response.id
+            actions.append(think_action)
+            logger.info('Created AgentThinkAction for reasoning trace from thinking model')
+        
+        # For regular models or when reasoning should be combined with thought:
+        # Combine reasoning with thought if present (but only if we didn't create a separate think action)
+        if reasoning_stripped and not tool_calls_extracted_from_content:
+            thought = f'{reasoning_stripped}\n{thought}' if thought else reasoning_stripped
 
         # Process each tool call to OpenHands action
         for i, tool_call in enumerate(tool_calls):
@@ -529,8 +628,10 @@ def response_to_actions(
                     f'Tool {function_name} is not registered. (arguments: {arguments}). Please check the tool name and retry with an existing tool.'
                 )
 
-            # We only add thought to the first action
-            if i == 0:
+            # We only add thought to the first action, and only if we didn't create a separate think action
+            # (for thinking models, reasoning is already in the separate think action)
+            # Note: reasoning_stripped is computed above before the loop
+            if i == 0 and not (tool_calls_extracted_from_content and reasoning_stripped):
                 action = combine_thought(action, thought)
             # Add metadata for tool calling
             # Safely get tool_call.id (handle both dict and object access)
