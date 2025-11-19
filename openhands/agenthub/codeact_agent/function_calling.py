@@ -201,7 +201,7 @@ def set_security_risk(action: Action, arguments: dict) -> None:
             logger.warning(f'Invalid security_risk value: {arguments["security_risk"]}')
 
 
-def extract_tool_calls_from_content(content: str) -> list[ChatCompletionMessageToolCall]:
+def extract_tool_calls_from_content(content: str, mcp_tool_names: list[str] | None = None) -> list[ChatCompletionMessageToolCall]:
     """Extract tool calls from content field when embedded in thinking model responses.
     
     Thinking models (e.g., Qwen3-Thinking) output tool calls embedded in the content
@@ -284,7 +284,21 @@ def extract_tool_calls_from_content(content: str) -> list[ChatCompletionMessageT
                 logger.warning(f'Tool call {i+1} missing name field. Data: {tool_call_data}')
                 continue
             
+            # Apply fuzzy matching to tool name during extraction
+            # This ensures we fix tool names early, before processing
+            # Include MCP tools if available for better matching
+            available_tool_names = _get_available_tool_names(mcp_tool_names)
+            matched_tool_name = _fuzzy_match_tool_name(tool_name, available_tool_names)
+            if matched_tool_name and matched_tool_name != tool_name:
+                logger.info(f'✅ Fixed tool name during extraction: "{tool_name}" -> "{matched_tool_name}"')
+                tool_name = matched_tool_name
+            elif not matched_tool_name:
+                # Log warning if tool name doesn't match - this will help debug issues
+                logger.warning(f'⚠️ Tool name "{tool_name}" not found in available tools during extraction. Will retry with fuzzy matching during processing.')
+            
             # Create a ChatCompletionMessageToolCall object
+            # The function attribute can be a dict or an object - we'll use dict format
+            # which is compatible with how litellm handles it
             tool_call = ChatCompletionMessageToolCall(
                 id=f'call_{uuid.uuid4().hex[:16]}',
                 type='function',
@@ -418,7 +432,7 @@ def response_to_actions(
             logger.debug(f'Content preview (first 500 chars): {content_str[:500]}...')
             logger.debug(f'Content preview (last 500 chars): ...{content_str[-500:]}')
         
-        extracted_tool_calls = extract_tool_calls_from_content(content_str)
+        extracted_tool_calls = extract_tool_calls_from_content(content_str, mcp_tool_names)
         if extracted_tool_calls:
             tool_calls = extracted_tool_calls
             tool_calls_extracted_from_content = True
@@ -513,13 +527,15 @@ def response_to_actions(
                         f'Unable to access function name/arguments from tool call. Function type: {type(function_obj)}, value: {function_obj}, hasattr name: {hasattr(function_obj, "name") if hasattr(function_obj, "__class__") else "N/A"}'
                     )
                 
-                # Try fuzzy matching for tool name before processing
-                # This handles common mistakes like plural vs singular, underscore variations, etc.
+                # Apply fuzzy matching to tool name - always do this to catch any issues
+                # For extracted tool calls, fuzzy matching was already attempted during extraction
+                # But we retry here in case MCP tools weren't available during extraction
+                # For standard tool calls, we always do fuzzy matching here
                 original_function_name = function_name
                 available_tool_names = _get_available_tool_names(mcp_tool_names)
                 matched_name = _fuzzy_match_tool_name(function_name, available_tool_names)
                 if matched_name and matched_name != function_name:
-                    logger.info(f'Fuzzy matched tool name "{function_name}" -> "{matched_name}"')
+                    logger.info(f'✅ Fixed tool name during processing: "{original_function_name}" -> "{matched_name}"')
                     function_name = matched_name
                 
                 # Ensure function_arguments is a string
@@ -783,14 +799,29 @@ def response_to_actions(
                 # Don't append action, but continue to next tool call
                 continue
         
-        # Special case: If we extracted tool calls from content but ALL of them failed,
-        # and we don't have a think action, create a MessageAction with the cleaned content
-        # This ensures we always have at least one action for thinking models
-        if tool_calls_extracted_from_content and len(actions) == 0:
-            logger.warning('All extracted tool calls failed to process. Creating MessageAction with cleaned content.')
-            # Use the cleaned content (after removing tool_call tags) as the message
-            # Prefer thought (which is cleaned_content), then cleaned_content, then raw content_str
-            message_content = thought if thought else (cleaned_content if cleaned_content else content_str)
+        # Safety check: If ALL tool calls failed to process, log detailed error and create fallback
+        # This should rarely happen if extraction and processing work correctly
+        if len(actions) == 0:
+            logger.error('All tool calls failed to process. This indicates a problem with tool call extraction or processing.')
+            logger.error(f'Number of tool calls attempted: {len(tool_calls)}')
+            logger.error(f'Tool calls extracted from content: {tool_calls_extracted_from_content}')
+            if tool_calls:
+                for i, tc in enumerate(tool_calls):
+                    try:
+                        if hasattr(tc, 'function'):
+                            func = tc.function
+                            if isinstance(func, dict):
+                                logger.error(f'  Tool call {i+1}: name={func.get("name")}, args={func.get("arguments", "")[:100]}')
+                            elif hasattr(func, 'name'):
+                                logger.error(f'  Tool call {i+1}: name={func.name}, args={func.arguments[:100] if hasattr(func, "arguments") else "N/A"}')
+                    except Exception as e:
+                        logger.error(f'  Tool call {i+1}: Could not inspect - {e}')
+            
+            # Create fallback MessageAction to keep interaction going
+            if tool_calls_extracted_from_content:
+                message_content = thought if thought else (cleaned_content if cleaned_content else content_str)
+            else:
+                message_content = thought if thought else content_str
             fallback_action = MessageAction(
                 content=message_content if message_content else str(assistant_msg.content) if assistant_msg.content else '',
                 wait_for_response=True,
