@@ -28,6 +28,95 @@ from openhands.core.exceptions import (
     FunctionCallValidationError,
 )
 from openhands.core.logger import openhands_logger as logger
+
+# Set up a dedicated file handler for tool call debugging
+# This writes to a file in the trajectory directory for each task instance
+_tool_call_debug_handler = None
+_tool_call_debug_log_file = None
+
+def _find_trajectory_directory():
+    """Find the trajectory directory for the current task instance.
+    
+    Looks for common patterns:
+    - eval-results/*/trajectories/*/ (evaluation output structure)
+    - Any directory containing output.jsonl (trajectory output file)
+    - Falls back to /tmp if not found
+    """
+    cwd = os.getcwd()
+    
+    # Check if we're already in a trajectory directory (has output.jsonl)
+    if os.path.exists(os.path.join(cwd, 'output.jsonl')):
+        return cwd
+    
+    # Check parent directories for trajectory structure
+    current = Path(cwd)
+    for parent in [current] + list(current.parents)[:5]:  # Check up to 5 levels up
+        # Check for eval-results/*/trajectories/*/ pattern
+        if 'trajectories' in str(parent):
+            # Check if this directory or a subdirectory has output.jsonl
+            for subdir in [parent] + [p for p in parent.iterdir() if p.is_dir()]:
+                if (subdir / 'output.jsonl').exists():
+                    return str(subdir)
+            # If we're in a trajectories directory, use it
+            if (parent / 'output.jsonl').exists():
+                return str(parent)
+        
+        # Check if this directory has output.jsonl
+        if (parent / 'output.jsonl').exists():
+            return str(parent)
+    
+    # Fall back to /tmp
+    return '/tmp'
+
+def _setup_tool_call_debug_logging():
+    """Set up a file handler for tool call debugging.
+    
+    Writes to tool_call_debug.log in the trajectory directory for the current task instance.
+    """
+    global _tool_call_debug_handler, _tool_call_debug_log_file
+    if _tool_call_debug_handler is None:
+        try:
+            # Find the trajectory directory
+            trajectory_dir = _find_trajectory_directory()
+            log_file = os.path.join(trajectory_dir, 'tool_call_debug.log')
+            _tool_call_debug_log_file = log_file
+            
+            # Create directory if it doesn't exist
+            log_file_path = Path(log_file)
+            log_file_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Create file handler
+            _tool_call_debug_handler = logging.FileHandler(
+                log_file,
+                mode='a',
+                encoding='utf-8'
+            )
+            _tool_call_debug_handler.setLevel(logging.DEBUG)
+            formatter = logging.Formatter(
+                '%(asctime)s - %(name)s:%(levelname)s - %(filename)s:%(lineno)s - %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S'
+            )
+            _tool_call_debug_handler.setFormatter(formatter)
+            
+            # Create a separate logger for tool call debugging
+            tool_call_logger = logging.getLogger('openhands.tool_calls')
+            tool_call_logger.setLevel(logging.DEBUG)
+            tool_call_logger.addHandler(_tool_call_debug_handler)
+            tool_call_logger.propagate = False
+            
+            logger.info(f'Tool call debug logging enabled: {log_file}')
+        except Exception as e:
+            logger.warning(f'Failed to set up tool call debug logging: {e}')
+
+# Create a logger specifically for tool call debugging (lazy initialization)
+tool_call_debug_logger = logging.getLogger('openhands.tool_calls')
+
+def _ensure_tool_call_debug_logging():
+    """Ensure tool call debug logging is set up."""
+    global _tool_call_debug_handler
+    if _tool_call_debug_handler is None:
+        _setup_tool_call_debug_logging()
+
 from openhands.events.action import (
     Action,
     ActionSecurityRisk,

@@ -152,16 +152,16 @@ def response_to_actions(
     tool_calls_extracted_from_content = False
     
     # Get content string for processing
-    content_str = ''
-    if isinstance(assistant_msg.content, str):
-        content_str = assistant_msg.content
-    elif isinstance(assistant_msg.content, list):
-        for msg in assistant_msg.content:
-            if isinstance(msg, dict) and msg.get('type') == 'text':
-                content_str += msg.get('text', '')
-            elif isinstance(msg, str):
-                content_str += msg
-    
+        content_str = ''
+        if isinstance(assistant_msg.content, str):
+            content_str = assistant_msg.content
+        elif isinstance(assistant_msg.content, list):
+            for msg in assistant_msg.content:
+                if isinstance(msg, dict) and msg.get('type') == 'text':
+                    content_str += msg.get('text', '')
+                elif isinstance(msg, str):
+                    content_str += msg
+        
     logger.debug(f'Content type: {type(assistant_msg.content)}, Content length: {len(content_str)}')
     logger.debug(f'Standard tool_calls field: {len(tool_calls) if tool_calls else 0} tool call(s)')
     
@@ -179,9 +179,9 @@ def response_to_actions(
             logger.debug(f'Content preview (first 500 chars): {content_str[:500]}...')
             logger.debug(f'Content preview (last 500 chars): ...{content_str[-500:]}')
         
-        extracted_tool_calls = extract_tool_calls_from_content(content_str)
-        if extracted_tool_calls:
-            tool_calls = extracted_tool_calls
+            extracted_tool_calls = extract_tool_calls_from_content(content_str)
+            if extracted_tool_calls:
+                tool_calls = extracted_tool_calls
             tool_calls_extracted_from_content = True
             logger.info(f'✅ Extracted {len(tool_calls)} tool call(s) from content')
             for i, tc in enumerate(tool_calls):
@@ -332,7 +332,7 @@ def response_to_actions(
                     raise FunctionCallValidationError(
                         f'ReadOnlyAgent does not support str_replace_editor command "{command}". '
                         f'Only "view" command is allowed. Use CodeActAgent for file editing operations.'
-                    )
+                )
 
             # ================================================
             # AgentThinkAction
@@ -430,7 +430,7 @@ def response_to_actions(
         )
         fallback_action.response_id = response.id
         actions.append(fallback_action)
-    
+
     assert len(actions) >= 1
     return actions
 
