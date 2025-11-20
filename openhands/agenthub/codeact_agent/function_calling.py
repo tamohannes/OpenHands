@@ -28,95 +28,6 @@ from openhands.core.exceptions import (
     FunctionCallValidationError,
 )
 from openhands.core.logger import openhands_logger as logger
-
-# Set up a dedicated file handler for tool call debugging
-# This writes to a file in the trajectory directory for each task instance
-_tool_call_debug_handler = None
-_tool_call_debug_log_file = None
-
-def _find_trajectory_directory():
-    """Find the trajectory directory for the current task instance.
-    
-    Looks for common patterns:
-    - eval-results/*/trajectories/*/ (evaluation output structure)
-    - Any directory containing output.jsonl (trajectory output file)
-    - Falls back to /tmp if not found
-    """
-    cwd = os.getcwd()
-    
-    # Check if we're already in a trajectory directory (has output.jsonl)
-    if os.path.exists(os.path.join(cwd, 'output.jsonl')):
-        return cwd
-    
-    # Check parent directories for trajectory structure
-    current = Path(cwd)
-    for parent in [current] + list(current.parents)[:5]:  # Check up to 5 levels up
-        # Check for eval-results/*/trajectories/*/ pattern
-        if 'trajectories' in str(parent):
-            # Check if this directory or a subdirectory has output.jsonl
-            for subdir in [parent] + [p for p in parent.iterdir() if p.is_dir()]:
-                if (subdir / 'output.jsonl').exists():
-                    return str(subdir)
-            # If we're in a trajectories directory, use it
-            if (parent / 'output.jsonl').exists():
-                return str(parent)
-        
-        # Check if this directory has output.jsonl
-        if (parent / 'output.jsonl').exists():
-            return str(parent)
-    
-    # Fall back to /tmp
-    return '/tmp'
-
-def _setup_tool_call_debug_logging():
-    """Set up a file handler for tool call debugging.
-    
-    Writes to tool_call_debug.log in the trajectory directory for the current task instance.
-    """
-    global _tool_call_debug_handler, _tool_call_debug_log_file
-    if _tool_call_debug_handler is None:
-        try:
-            # Find the trajectory directory
-            trajectory_dir = _find_trajectory_directory()
-            log_file = os.path.join(trajectory_dir, 'tool_call_debug.log')
-            _tool_call_debug_log_file = log_file
-            
-            # Create directory if it doesn't exist
-            log_file_path = Path(log_file)
-            log_file_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            # Create file handler
-            _tool_call_debug_handler = logging.FileHandler(
-                log_file,
-                mode='a',
-                encoding='utf-8'
-            )
-            _tool_call_debug_handler.setLevel(logging.DEBUG)
-            formatter = logging.Formatter(
-                '%(asctime)s - %(name)s:%(levelname)s - %(filename)s:%(lineno)s - %(message)s',
-                datefmt='%Y-%m-%d %H:%M:%S'
-            )
-            _tool_call_debug_handler.setFormatter(formatter)
-            
-            # Create a separate logger for tool call debugging
-            tool_call_logger = logging.getLogger('openhands.tool_calls')
-            tool_call_logger.setLevel(logging.DEBUG)
-            tool_call_logger.addHandler(_tool_call_debug_handler)
-            tool_call_logger.propagate = False
-            
-            logger.info(f'Tool call debug logging enabled: {log_file}')
-        except Exception as e:
-            logger.warning(f'Failed to set up tool call debug logging: {e}')
-
-# Create a logger specifically for tool call debugging (lazy initialization)
-tool_call_debug_logger = logging.getLogger('openhands.tool_calls')
-
-def _ensure_tool_call_debug_logging():
-    """Ensure tool call debug logging is set up."""
-    global _tool_call_debug_handler
-    if _tool_call_debug_handler is None:
-        _setup_tool_call_debug_logging()
-
 from openhands.events.action import (
     Action,
     ActionSecurityRisk,
@@ -332,19 +243,30 @@ def extract_tool_calls_from_content(content: str, mcp_tool_names: list[str] | No
         if not tool_call_content:
             logger.warning(f'Tool call {i+1} has empty content between tags')
             continue
-        
+            
         try:
+            logger.debug(f'Processing tool call {i+1}, raw content length: {len(tool_call_content)}')
+            logger.debug(f'Raw content (first 500 chars): {tool_call_content[:500]}')
+            
             # Parse the JSON tool call data
             # Try to parse as-is first
             try:
                 tool_call_data = json.loads(tool_call_content)
-            except json.JSONDecodeError:
+                logger.debug(f'✅ Successfully parsed tool call {i+1} JSON on first try')
+            except json.JSONDecodeError as e:
+                logger.warning(f'⚠️  Failed to parse tool call {i+1} JSON on first try: {e}')
                 # Sometimes the JSON might have extra whitespace or newlines
                 # Try cleaning it up
                 cleaned = tool_call_content.strip()
                 # Remove any leading/trailing whitespace and newlines
                 cleaned = re.sub(r'^\s+|\s+$', '', cleaned, flags=re.MULTILINE)
-                tool_call_data = json.loads(cleaned)
+                try:
+                    tool_call_data = json.loads(cleaned)
+                    logger.info(f'✅ Successfully parsed tool call {i+1} JSON after cleaning')
+                except json.JSONDecodeError as e2:
+                    logger.error(f'❌ Failed to parse tool call {i+1} JSON even after cleaning: {e2}')
+                    logger.error(f'Cleaned content (first 500 chars): {cleaned[:500]}')
+                    raise
             
             # Extract name and arguments
             tool_name = tool_call_data.get('name', '')
@@ -563,6 +485,15 @@ def response_to_actions(
         if reasoning_stripped and tool_calls_extracted_from_content:
             think_action = AgentThinkAction(thought=reasoning_stripped)
             think_action.response_id = response.id
+            # Set tool_call_metadata to None for think actions (they don't correspond to tool calls)
+            # But we still need to set it to avoid the assertion error
+            # Use a special marker to indicate this is a reasoning-only action
+            think_action.tool_call_metadata = ToolCallMetadata(
+                tool_call_id=f'think_{uuid.uuid4().hex[:16]}',
+                function_name='think',  # Special marker for reasoning actions
+                model_response=response,
+                total_calls_in_response=len(tool_calls) if tool_calls else 0,
+            )
             actions.append(think_action)
             logger.info('Created AgentThinkAction for reasoning trace from thinking model')
         
@@ -631,23 +562,33 @@ def response_to_actions(
                 if not isinstance(function_arguments, str):
                     function_arguments = json.dumps(function_arguments) if function_arguments else '{}'
                 
-                arguments = json.loads(function_arguments)
-            except json.decoder.JSONDecodeError as e:
-                raise FunctionCallValidationError(
-                    f'Failed to parse tool call arguments: {function_arguments}'
-                ) from e
+                # Parse arguments
+                try:
+                    arguments = json.loads(function_arguments)
+                except json.decoder.JSONDecodeError as e:
+                    logger.error(f'❌ Failed to parse tool call arguments for {function_name}: {function_arguments}')
+                    logger.error(f'Error: {e}')
+                    raise FunctionCallValidationError(
+                        f'Failed to parse tool call arguments: {function_arguments}'
+                    ) from e
+                
+                logger.info(f'✅ Parsed arguments for {function_name}: {list(arguments.keys())}')
 
                 # ================================================
                 # CmdRunTool (Bash)
                 # ================================================
-                if function_name == create_cmd_run_tool()['function']['name']:
+                expected_bash_name = create_cmd_run_tool()['function']['name']
+                if function_name == expected_bash_name:
+                    logger.info(f'✅ Processing execute_bash tool call')
                     if 'command' not in arguments:
+                        logger.error(f'❌ Missing required argument "command" in tool call {function_name}')
                         raise FunctionCallValidationError(
                             f'Missing required argument "command" in tool call {function_name}'
                         )
                     # convert is_input to boolean
                     is_input = arguments.get('is_input', 'false') == 'true'
                     action = CmdRunAction(command=arguments['command'], is_input=is_input)
+                    logger.info(f'✅ Created CmdRunAction with command: {arguments["command"][:100]}...')
 
                     # Set hard timeout if provided
                     if 'timeout' in arguments:
@@ -942,6 +883,6 @@ def response_to_actions(
         )
         fallback_action.response_id = response.id
         actions.append(fallback_action)
-    
+
     assert len(actions) >= 1
     return actions
