@@ -152,16 +152,16 @@ def response_to_actions(
     tool_calls_extracted_from_content = False
     
     # Get content string for processing
-        content_str = ''
-        if isinstance(assistant_msg.content, str):
-            content_str = assistant_msg.content
-        elif isinstance(assistant_msg.content, list):
-            for msg in assistant_msg.content:
-                if isinstance(msg, dict) and msg.get('type') == 'text':
-                    content_str += msg.get('text', '')
-                elif isinstance(msg, str):
-                    content_str += msg
-        
+    content_str = ''
+    if isinstance(assistant_msg.content, str):
+        content_str = assistant_msg.content
+    elif isinstance(assistant_msg.content, list):
+        for msg in assistant_msg.content:
+            if isinstance(msg, dict) and msg.get('type') == 'text':
+                content_str += msg.get('text', '')
+            elif isinstance(msg, str):
+                content_str += msg
+    
     logger.debug(f'Content type: {type(assistant_msg.content)}, Content length: {len(content_str)}')
     logger.debug(f'Standard tool_calls field: {len(tool_calls) if tool_calls else 0} tool call(s)')
     
