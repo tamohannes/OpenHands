@@ -2,6 +2,7 @@ from typing import Generator
 
 from litellm import ModelResponse
 
+from openhands.agenthub.codeact_agent.function_calling import extract_tool_calls_from_content
 from openhands.core.config.agent_config import AgentConfig
 from openhands.core.logger import openhands_logger as logger
 from openhands.core.message import ImageContent, Message, TextContent
@@ -257,15 +258,46 @@ class ConversationMemory:
             llm_response: ModelResponse = tool_metadata.model_response
             assistant_msg = getattr(llm_response.choices[0], 'message')
 
+            # Extract tool calls - check standard field first, then extract from content if needed
+            tool_calls = assistant_msg.tool_calls
+            if tool_calls is None or len(tool_calls) == 0:
+                # For thinking models, tool calls may be embedded in content
+                content_str = assistant_msg.content
+                if isinstance(content_str, list):
+                    # Handle multi-modal content - extract text parts
+                    content_str = ''.join(
+                        item.get('text', '') if isinstance(item, dict) else str(item)
+                        for item in content_str
+                        if isinstance(item, (str, dict))
+                    )
+                if isinstance(content_str, str) and content_str:
+                    extracted_tool_calls = extract_tool_calls_from_content(content_str)
+                    if extracted_tool_calls:
+                        tool_calls = extracted_tool_calls
+                        logger.debug(f'Extracted {len(tool_calls)} tool call(s) from content in conversation_memory')
+
+            # Get content string for the message
+            content_str = assistant_msg.content
+            if isinstance(content_str, list):
+                # Handle multi-modal content
+                content = []
+                for item in content_str:
+                    if isinstance(item, dict):
+                        if item.get('type') == 'text':
+                            content.append(TextContent(text=item.get('text', '')))
+                        elif item.get('type') == 'image_url':
+                            content.append(ImageContent(image_urls=[item.get('image_url', {}).get('url', '')]))
+                    elif isinstance(item, str):
+                        content.append(TextContent(text=item))
+            else:
+                content = [TextContent(text=content_str)] if content_str and str(content_str).strip() else []
+
             # Add the LLM message (assistant) that initiated the tool calls
             # (overwrites any previous message with the same response_id)
             pending_tool_call_action_messages[llm_response.id] = Message(
                 role=getattr(assistant_msg, 'role', 'assistant'),
-                # tool call content SHOULD BE a string
-                content=[TextContent(text=assistant_msg.content)]
-                if assistant_msg.content and assistant_msg.content.strip()
-                else [],
-                tool_calls=assistant_msg.tool_calls,
+                content=content,
+                tool_calls=tool_calls,
             )
             return []
         elif isinstance(action, AgentFinishAction):

@@ -151,6 +151,9 @@ def response_to_actions(
     # Track if tool calls were extracted from content (thinking model case)
     tool_calls_extracted_from_content = False
     
+    # Initialize variables for reasoning extraction (needed for summary logging)
+    reasoning_stripped = ''
+    
     # Get content string for processing
     content_str = ''
     if isinstance(assistant_msg.content, str):
@@ -204,6 +207,8 @@ def response_to_actions(
         thought = ''
         reasoning = ''
         
+        logger.info(f'Processing response with {len(tool_calls)} tool call(s). Tool calls extracted from content: {tool_calls_extracted_from_content}')
+        
         if content_str:
             # Extract reasoning first (everything before </think>)
             cleaned_content, reasoning = extract_reasoning_from_content(content_str)
@@ -215,13 +220,22 @@ def response_to_actions(
         # Strip reasoning to check if it's non-empty
         reasoning_stripped = reasoning.strip() if reasoning else ''
         
+        # Log reasoning extraction results
+        if reasoning_stripped:
+            logger.info(f'Extracted reasoning trace: {len(reasoning_stripped)} characters')
+            logger.debug(f'Reasoning preview (first 200 chars): {reasoning_stripped[:200]}...')
+        else:
+            logger.debug('No reasoning trace found in content')
+        
         # For thinking models: if reasoning exists and tool calls were extracted from content,
         # create a separate AgentThinkAction as the first action
+        # The reasoning trace IS the "think" tool call for thinking models
         if reasoning_stripped and tool_calls_extracted_from_content:
+            logger.info(f'Creating AgentThinkAction from reasoning trace ({len(reasoning_stripped)} chars) - this represents the thinking model\'s reasoning process')
             think_action = AgentThinkAction(thought=reasoning_stripped)
             think_action.response_id = response.id
             actions.append(think_action)
-            logger.debug('Created AgentThinkAction for reasoning trace from thinking model')
+            logger.info(f'✅ Created AgentThinkAction for reasoning trace from thinking model (thought length: {len(reasoning_stripped)} chars)')
         
         # For regular models or when reasoning should be combined with thought:
         # Combine reasoning with thought if present (but only if we didn't create a separate think action)
@@ -229,8 +243,10 @@ def response_to_actions(
             thought = f'{reasoning_stripped}\n{thought}' if thought else reasoning_stripped
 
         # Process each tool call to OpenHands action
+        logger.info(f'Processing {len(tool_calls)} tool call(s) from response:')
         for i, tool_call in enumerate(tool_calls):
             action: Action
+            logger.info(f'  [{i+1}/{len(tool_calls)}] Processing tool call {i+1}')
             logger.debug(f'Tool call in function_calling.py: {tool_call}')
             try:
                 # Handle both dict and object access for function attribute
@@ -405,6 +421,7 @@ def response_to_actions(
                 total_calls_in_response=len(tool_calls),
             )
             actions.append(action)
+            logger.info(f'  ✅ [{i+1}/{len(tool_calls)}] Successfully created {type(action).__name__} for tool: {function_name}')
     else:
         actions.append(
             MessageAction(
@@ -430,6 +447,15 @@ def response_to_actions(
         )
         fallback_action.response_id = response.id
         actions.append(fallback_action)
+
+    # Log summary of all created actions
+    action_types = [type(a).__name__ for a in actions]
+    action_summary = ', '.join(f'{action_types.count(t)}x {t}' for t in set(action_types))
+    logger.info(f'📋 Summary: Created {len(actions)} action(s) from response: {action_summary}')
+    # Check if we have reasoning and tool calls (variables may not exist if no tool_calls block executed)
+    if 'reasoning_stripped' in locals() and 'tool_calls_extracted_from_content' in locals():
+        if tool_calls_extracted_from_content and reasoning_stripped:
+            logger.info(f'   └─ Thinking model detected: reasoning trace ({len(reasoning_stripped)} chars) + {len(tool_calls) if "tool_calls" in locals() else 0} tool call(s)')
 
     assert len(actions) >= 1
     return actions
