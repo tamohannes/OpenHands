@@ -238,6 +238,10 @@ def extract_tool_calls_from_content(content: str, mcp_tool_names: list[str] | No
     
     logger.debug(f'Found {len(matches)} potential tool call(s) in content')
     
+    # Log if we find multiple tool calls (this is the expected behavior for thinking models)
+    if len(matches) > 1:
+        logger.info(f'✅ Found {len(matches)} tool calls in single response - this is expected for thinking models!')
+    
     for i, match in enumerate(matches):
         tool_call_content = match.group(1).strip()
         if not tool_call_content:

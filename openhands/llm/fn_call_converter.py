@@ -18,6 +18,7 @@ from openhands.core.exceptions import (
     FunctionCallConversionError,
     FunctionCallValidationError,
 )
+from openhands.core.logger import openhands_logger as logger
 from openhands.llm.tool_names import (
     BROWSER_TOOL_NAME,
     EXECUTE_BASH_TOOL_NAME,
@@ -487,6 +488,11 @@ def convert_fncall_messages_to_non_fncall_messages(
     system_prompt_suffix = SYSTEM_PROMPT_SUFFIX_TEMPLATE.format(
         description=formatted_tools
     )
+    
+    # Log tool availability for debugging thinking models
+    tool_names = [tool['function']['name'] for tool in tools if tool.get('type') == 'function']
+    logger.debug(f'🔧 Including {len(tool_names)} tools in system prompt: {", ".join(tool_names)}')
+    logger.debug(f'📏 Tool description length: {len(formatted_tools)} characters')
 
     converted_messages = []
     first_user_message_encountered = False

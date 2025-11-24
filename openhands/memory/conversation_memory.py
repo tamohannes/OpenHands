@@ -537,10 +537,36 @@ class ConversationMemory:
             )
             message = Message(role='user', content=[TextContent(text=text)])
         elif isinstance(obs, AgentThinkObservation):
-            text = truncate_content(obs.content, max_message_chars)
-            message = Message(role='user', content=[TextContent(text=text)])
+            # For thinking models, the reasoning trace is already in the assistant message
+            # The "Your thought has been logged." message doesn't provide useful context
+            # Skip adding this observation to conversation history to avoid confusion
+            # The model already sees its reasoning in the assistant message
+            logger.debug('Skipping AgentThinkObservation in conversation history - reasoning already in assistant message')
+            return []
         elif isinstance(obs, TaskTrackingObservation):
-            text = truncate_content(obs.content, max_message_chars)
+            # For task tracking, include the task list details if available
+            # This is crucial for thinking models to understand what tasks were created/updated
+            text = obs.content or ''
+            
+            # If we have a task list and the command was 'plan', include the task details
+            # This helps the model understand what tasks it created and avoid redundant calls
+            if obs.command == 'plan' and obs.task_list:
+                text += '\n\nCurrent Task List:'
+                for i, task in enumerate(obs.task_list, 1):
+                    status_icon = {
+                        'todo': '⏳',
+                        'in_progress': '🔄',
+                        'done': '✅',
+                    }.get(task.get('status', 'todo'), '⏳')
+                    title = task.get('title', 'Untitled task')
+                    notes = task.get('notes', '')
+                    status = task.get('status', 'todo')
+                    text += f'\n{i}. {status_icon} [{status.upper()}] {title}'
+                    if notes:
+                        text += f'\n   Notes: {notes}'
+                logger.debug(f'Including task list details in TaskTrackingObservation ({len(obs.task_list)} tasks)')
+            
+            text = truncate_content(text, max_message_chars)
             message = Message(role='user', content=[TextContent(text=text)])
         elif isinstance(obs, ErrorObservation):
             text = truncate_content(obs.content, max_message_chars)
