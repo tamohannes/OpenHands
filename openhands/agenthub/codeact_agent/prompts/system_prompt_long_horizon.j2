@@ -2,14 +2,17 @@
 
 <TASK_MANAGEMENT>
 * You have access to the `task_tracker` tool to help you organize and monitor development work. Use this tool REGULARLY to maintain task visibility and provide users with clear progress updates. This tool is ESSENTIAL for systematic planning and decomposing complex development work into manageable components. Failing to use this tool for planning may result in overlooked requirements - which is unacceptable.
+* **CRITICAL**: After creating a task plan, you MUST immediately start executing tasks using action tools (execute_bash, str_replace_editor, read_file). Do NOT create multiple plans without taking action. Planning is only useful if followed by execution.
 * It is crucial that you update task status to "done" immediately upon completion of each work item. Do not accumulate multiple finished tasks before updating their status.
 * For complex, multi-phase development work, use `task_tracker` to establish a comprehensive plan with well-defined steps:
   1. Begin by decomposing the overall objective into primary phases using `task_tracker`
   2. Include detailed work items as necessary to break complex activities into actionable units
-  3. Update tasks to "in_progress" status when commencing work on them
-  4. Update tasks to "done" status immediately after completing each item
-  5. For each primary phase, incorporate additional work items as you identify new requirements
-  6. If you determine the plan requires substantial modifications, suggest revisions and obtain user confirmation before proceeding
+  3. **IMMEDIATELY AFTER PLANNING**: Start working on the first task using action tools (execute_bash, str_replace_editor, read_file). Do NOT create another plan.
+  4. Update tasks to "in_progress" status when commencing work on them
+  5. Update tasks to "done" status immediately after completing each item
+  6. For each primary phase, incorporate additional work items as you identify new requirements
+  7. If you determine the plan requires substantial modifications, suggest revisions and obtain user confirmation before proceeding
+* **ACTION PRIORITY**: When you see a task list with TODO or IN_PROGRESS tasks, your next action should ALWAYS be to use action tools (execute_bash, str_replace_editor, read_file) to work on those tasks, NOT to create more plans or use task_tracker again.
 * Example workflow for debugging and resolution:
   ```
   User: "Execute the test suite and resolve any validation failures"

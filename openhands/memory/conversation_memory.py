@@ -552,6 +552,52 @@ class ConversationMemory:
             # This helps the model understand what tasks it created and avoid redundant calls
             if obs.command == 'plan' and obs.task_list:
                 text += '\n\nCurrent Task List:'
+                todo_tasks = []
+                in_progress_tasks = []
+                done_tasks = []
+                
+                for i, task in enumerate(obs.task_list, 1):
+                    status_icon = {
+                        'todo': '⏳',
+                        'in_progress': '🔄',
+                        'done': '✅',
+                    }.get(task.get('status', 'todo'), '⏳')
+                    title = task.get('title', 'Untitled task')
+                    notes = task.get('notes', '')
+                    status = task.get('status', 'todo')
+                    task_text = f'\n{i}. {status_icon} [{status.upper()}] {title}'
+                    if notes:
+                        task_text += f'\n   Notes: {notes}'
+                    
+                    # Group tasks by status for better visibility
+                    if status == 'done':
+                        done_tasks.append(task_text)
+                    elif status == 'in_progress':
+                        in_progress_tasks.append(task_text)
+                    else:
+                        todo_tasks.append(task_text)
+                
+                # Show tasks in priority order: in_progress, todo, done
+                if in_progress_tasks:
+                    text += '\n\n🔄 IN PROGRESS:'
+                    text += ''.join(in_progress_tasks)
+                    text += '\n\n⚠️ ACTION REQUIRED: Continue working on the in-progress task above. Use action tools (execute_bash, str_replace_editor, read_file) to make progress.'
+                
+                if todo_tasks:
+                    text += '\n\n⏳ TODO:'
+                    text += ''.join(todo_tasks)
+                    if not in_progress_tasks:
+                        # If no task is in progress, prompt to start the first todo task
+                        text += '\n\n⚠️ ACTION REQUIRED: Start working on the first TODO task. Use action tools (execute_bash, str_replace_editor, read_file) to begin implementation. Do NOT create more plans - take action!'
+                
+                if done_tasks:
+                    text += '\n\n✅ DONE:'
+                    text += ''.join(done_tasks)
+                
+                logger.debug(f'Including task list details in TaskTrackingObservation ({len(obs.task_list)} tasks: {len(todo_tasks)} todo, {len(in_progress_tasks)} in_progress, {len(done_tasks)} done)')
+            elif obs.command == 'view' and obs.task_list:
+                # For 'view' command, also show task status and next actions
+                text += '\n\nCurrent Task List:'
                 for i, task in enumerate(obs.task_list, 1):
                     status_icon = {
                         'todo': '⏳',
@@ -564,7 +610,14 @@ class ConversationMemory:
                     text += f'\n{i}. {status_icon} [{status.upper()}] {title}'
                     if notes:
                         text += f'\n   Notes: {notes}'
-                logger.debug(f'Including task list details in TaskTrackingObservation ({len(obs.task_list)} tasks)')
+                
+                # Check if there are todo or in_progress tasks
+                has_active_tasks = any(
+                    task.get('status', 'todo') in ['todo', 'in_progress']
+                    for task in obs.task_list
+                )
+                if has_active_tasks:
+                    text += '\n\n⚠️ ACTION REQUIRED: You have active tasks. Use action tools (execute_bash, str_replace_editor, read_file) to work on them. Do NOT create more plans - take action!'
             
             text = truncate_content(text, max_message_chars)
             message = Message(role='user', content=[TextContent(text=text)])
