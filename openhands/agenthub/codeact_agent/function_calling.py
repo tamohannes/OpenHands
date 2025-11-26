@@ -337,16 +337,55 @@ def extract_tool_calls_from_content(content: str, mcp_tool_names: list[str] | No
     return tool_calls
 
 
+def extract_planning_from_content(content: str) -> str:
+    """Extract planning thoughts from <planning> tags.
+    
+    Planning tags contain high-level strategy and task breakdown that should
+    be preserved in context as AgentThinkAction.
+    
+    Expected format:
+        <planning>
+        [planning text]
+        </planning>
+    
+    Args:
+        content: The content string that may contain planning tags
+        
+    Returns:
+        Extracted planning content, or empty string if not found
+    """
+    if not content or not isinstance(content, str):
+        return ''
+    
+    pattern = r'<planning>(.*?)</planning>'
+    matches = re.findall(pattern, content, re.DOTALL)
+    planning = '\n\n'.join(matches).strip()
+    
+    if planning:
+        logger.debug(f'Extracted planning content: {len(planning)} characters')
+    
+    return planning
+
+
 def extract_reasoning_from_content(content: str) -> tuple[str, str]:
     """Extract reasoning traces from content and return cleaned content and reasoning.
     
     Thinking models output reasoning traces with only closing tags (no opening tags).
     Everything before the closing tag is considered reasoning.
     
+    Also extracts content from <reasoning> tags if present.
+    Reasoning content should be minimized in context as it's verbose.
+    
     Expected format:
         [reasoning text - everything before the closing tag]
         </think>
         [rest of content, possibly with tool calls]
+        
+        OR
+        
+        <reasoning>
+        [reasoning text]
+        </reasoning>
     
     Args:
         content: The content string that may contain reasoning traces
@@ -360,10 +399,29 @@ def extract_reasoning_from_content(content: str) -> tuple[str, str]:
     reasoning = ''
     cleaned_content = content
     
-    # Priority order: check for standalone closing tags first (most common case)
+    # First, extract and remove <reasoning> tags (paired tags)
+    # These should be minimized in context
+    reasoning_patterns = [
+        r'<reasoning>(.*?)</reasoning>',
+        r'<think>(.*?)</think>',
+    ]
+    
+    for pattern in reasoning_patterns:
+        matches = list(re.finditer(pattern, cleaned_content, re.DOTALL))
+        for match in matches:
+            reasoning_text = match.group(1).strip()
+            if reasoning_text:
+                if reasoning:
+                    reasoning += '\n\n' + reasoning_text
+                else:
+                    reasoning = reasoning_text
+                # Remove the reasoning tag from content
+                cleaned_content = cleaned_content.replace(match.group(0), '')
+                logger.debug(f'Extracted reasoning from paired tags (length: {len(reasoning_text)})')
+    
+    # Also handle standalone closing tags (legacy format)
     # These tags typically don't have opening tags - everything before them is reasoning
-    # The user confirmed that reasoning tags only have closing tags like </think>
-    # Note: Qwen3 thinking models use </think> tag (not </think>)
+    # Note: Qwen3 thinking models use </think> tag
     standalone_closing_tags = ['</think>', '</reasoning>']
     
     for closing_tag in standalone_closing_tags:
@@ -371,33 +429,16 @@ def extract_reasoning_from_content(content: str) -> tuple[str, str]:
             idx = cleaned_content.find(closing_tag)
             if idx > 0:
                 # Everything before the closing tag is reasoning
-                reasoning = cleaned_content[:idx].strip()
+                reasoning_text = cleaned_content[:idx].strip()
+                if reasoning_text:
+                    if reasoning:
+                        reasoning = reasoning_text + '\n\n' + reasoning
+                    else:
+                        reasoning = reasoning_text
                 # Remove everything up to and including the closing tag
                 cleaned_content = cleaned_content[idx + len(closing_tag):].strip()
-                logger.debug(f'Extracted reasoning from standalone {closing_tag} tag (length: {len(reasoning)})')
+                logger.debug(f'Extracted reasoning from standalone {closing_tag} tag (length: {len(reasoning_text)})')
                 break  # Only process the first matching closing tag
-    
-    # Also handle paired tags if they exist (less common but possible)
-    # This is a fallback in case some models use paired tags
-    if not reasoning:
-        reasoning_patterns = [
-            (r'<think>(.*?)</think>', '</think>'),
-            (r'<reasoning>(.*?)</reasoning>', '</reasoning>'),
-            (r'<think>(.*?)</think>', '</think>'),
-        ]
-        
-        for pattern, closing_tag in reasoning_patterns:
-            matches = list(re.finditer(pattern, cleaned_content, re.DOTALL))
-            for match in matches:
-                reasoning_text = match.group(1).strip()
-                if reasoning_text:
-                    reasoning = reasoning_text
-                    # Remove the reasoning tag from content
-                    cleaned_content = cleaned_content.replace(match.group(0), '')
-                    logger.debug(f'Extracted reasoning from paired tags with {closing_tag} (length: {len(reasoning)})')
-                    break
-            if reasoning:
-                break
     
     # Clean up extra whitespace
     cleaned_content = re.sub(r'\n\s*\n', '\n', cleaned_content).strip()
@@ -479,29 +520,38 @@ def response_to_actions(
         logger.info(f'Processing response with {len(tool_calls)} tool call(s). Tool calls extracted from content: {tool_calls_extracted_from_content}')
         
         if content_str:
-            # Extract reasoning first (everything before </think>)
+            # Extract planning, reasoning, and clean content
+            planning_content = extract_planning_from_content(content_str)
             cleaned_content, reasoning = extract_reasoning_from_content(content_str)
             # Remove tool_call tags if they were extracted from content
             if tool_calls_extracted_from_content:
                 cleaned_content = remove_tool_call_tags(cleaned_content)
             thought = cleaned_content
         
-        # Strip reasoning to check if it's non-empty
+        # Strip planning and reasoning to check if they're non-empty
+        planning_stripped = planning_content.strip() if planning_content else ''
         reasoning_stripped = reasoning.strip() if reasoning else ''
         
-        # Log reasoning extraction results
+        # Log extraction results
+        if planning_stripped:
+            logger.info(f'Extracted planning content: {len(planning_stripped)} characters')
+            logger.debug(f'Planning preview (first 200 chars): {planning_stripped[:200]}...')
         if reasoning_stripped:
-            logger.info(f'Extracted reasoning trace: {len(reasoning_stripped)} characters')
+            logger.info(f'Extracted reasoning trace: {len(reasoning_stripped)} characters (will be minimized in context)')
             logger.debug(f'Reasoning preview (first 200 chars): {reasoning_stripped[:200]}...')
-        else:
-            logger.debug('No reasoning trace found in content')
+        if not planning_stripped and not reasoning_stripped:
+            logger.debug('No planning or reasoning tags found in content')
         
-        # For thinking models: if reasoning exists and tool calls were extracted from content,
-        # create a separate AgentThinkAction as the first action
-        # The reasoning trace IS the "think" tool call for thinking models
-        if reasoning_stripped and tool_calls_extracted_from_content:
-            logger.info(f'Creating AgentThinkAction from reasoning trace ({len(reasoning_stripped)} chars) - this represents the thinking model\'s reasoning process')
-            think_action = AgentThinkAction(thought=reasoning_stripped)
+        # For thinking models: prioritize planning content for AgentThinkAction
+        # Planning content is useful for context, reasoning is verbose and should be minimized
+        think_content = planning_stripped if planning_stripped else reasoning_stripped
+        
+        # Create AgentThinkAction from planning (preferred) or reasoning (fallback)
+        # Only create if we have content and tool calls were extracted from content
+        if think_content and tool_calls_extracted_from_content:
+            content_type = 'planning' if planning_stripped else 'reasoning'
+            logger.info(f'Creating AgentThinkAction from {content_type} content ({len(think_content)} chars)')
+            think_action = AgentThinkAction(thought=think_content)
             think_action.response_id = response.id
             # Set tool_call_metadata to None for think actions (they don't correspond to tool calls)
             # But we still need to set it to avoid the assertion error
@@ -513,12 +563,19 @@ def response_to_actions(
                 total_calls_in_response=len(tool_calls) if tool_calls else 0,
             )
             actions.append(think_action)
-            logger.info(f'✅ Created AgentThinkAction for reasoning trace from thinking model (thought length: {len(reasoning_stripped)} chars)')
+            logger.info(f'✅ Created AgentThinkAction from {content_type} content (thought length: {len(think_content)} chars)')
+            
+            # Warn if we found planning but no tool calls (potential planning loop)
+            if planning_stripped and not tool_calls:
+                logger.warning('⚠️ Found planning content but no tool calls - model may be stuck in planning loop')
         
         # For regular models or when reasoning should be combined with thought:
-        # Combine reasoning with thought if present (but only if we didn't create a separate think action)
-        if reasoning_stripped and not tool_calls_extracted_from_content:
-            thought = f'{reasoning_stripped}\n{thought}' if thought else reasoning_stripped
+        # Combine planning/reasoning with thought if present (but only if we didn't create a separate think action)
+        if not tool_calls_extracted_from_content:
+            if planning_stripped:
+                thought = f'{planning_stripped}\n{thought}' if thought else planning_stripped
+            elif reasoning_stripped:
+                thought = f'{reasoning_stripped}\n{thought}' if thought else reasoning_stripped
 
         # Process each tool call to OpenHands action
         logger.info(f'Processing {len(tool_calls)} tool call(s) from response:')

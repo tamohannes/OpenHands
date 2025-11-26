@@ -1,3 +1,4 @@
+import re
 from typing import Generator
 
 from litellm import ModelResponse
@@ -71,6 +72,35 @@ class ConversationMemory:
             True if the URL is valid, False otherwise
         """
         return bool(url and url.strip())
+
+    @staticmethod
+    def _strip_reasoning_from_content(content: str) -> str:
+        """Remove reasoning tags but keep planning and tool calls.
+        
+        Reasoning tags contain verbose detailed reasoning that should be minimized
+        in context. Planning tags and tool_call tags are preserved.
+        
+        Args:
+            content: The content string that may contain reasoning tags
+            
+        Returns:
+            Content with reasoning tags removed
+        """
+        if not content or not isinstance(content, str):
+            return content
+        
+        # Remove reasoning tags (both paired and standalone closing tags)
+        # Keep planning tags and tool_call tags
+        content = re.sub(r'<reasoning>.*?</reasoning>', '', content, flags=re.DOTALL)
+        content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
+        # Remove standalone closing tags and everything before them (legacy format)
+        content = re.sub(r'.*?</reasoning>', '', content, flags=re.DOTALL)
+        content = re.sub(r'.*?</think>', '', content, flags=re.DOTALL)
+        
+        # Clean up extra whitespace
+        content = re.sub(r'\n\s*\n', '\n', content).strip()
+        
+        return content
 
     def process_events(
         self,
@@ -284,12 +314,20 @@ class ConversationMemory:
                 for item in content_str:
                     if isinstance(item, dict):
                         if item.get('type') == 'text':
-                            content.append(TextContent(text=item.get('text', '')))
+                            # Strip reasoning tags from text content
+                            text_content = item.get('text', '')
+                            text_content = self._strip_reasoning_from_content(text_content)
+                            content.append(TextContent(text=text_content))
                         elif item.get('type') == 'image_url':
                             content.append(ImageContent(image_urls=[item.get('image_url', {}).get('url', '')]))
                     elif isinstance(item, str):
-                        content.append(TextContent(text=item))
+                        # Strip reasoning tags from string content
+                        text_content = self._strip_reasoning_from_content(item)
+                        content.append(TextContent(text=text_content))
             else:
+                # Strip reasoning tags from content string
+                if content_str:
+                    content_str = self._strip_reasoning_from_content(str(content_str))
                 content = [TextContent(text=content_str)] if content_str and str(content_str).strip() else []
 
             # Add the LLM message (assistant) that initiated the tool calls

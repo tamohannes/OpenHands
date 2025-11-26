@@ -15,6 +15,7 @@ from litellm import (
 
 from openhands.agenthub.codeact_agent.function_calling import (
     combine_thought,
+    extract_planning_from_content,
     extract_tool_calls_from_content,
     extract_reasoning_from_content,
 )
@@ -206,41 +207,58 @@ def response_to_actions(
         # For thinking models: everything before </think> is reasoning
         thought = ''
         reasoning = ''
+        planning_content = ''  # Initialize for use in logging
         
         logger.info(f'Processing response with {len(tool_calls)} tool call(s). Tool calls extracted from content: {tool_calls_extracted_from_content}')
         
         if content_str:
-            # Extract reasoning first (everything before </think>)
+            # Extract planning, reasoning, and clean content
+            planning_content = extract_planning_from_content(content_str)
             cleaned_content, reasoning = extract_reasoning_from_content(content_str)
             # Remove tool_call tags if they were extracted from content
             if tool_calls_extracted_from_content:
                 cleaned_content = remove_tool_call_tags(cleaned_content)
             thought = cleaned_content
         
-        # Strip reasoning to check if it's non-empty
+        # Strip planning and reasoning to check if they're non-empty
+        planning_stripped = planning_content.strip() if planning_content else ''
         reasoning_stripped = reasoning.strip() if reasoning else ''
         
-        # Log reasoning extraction results
+        # Log extraction results
+        if planning_stripped:
+            logger.info(f'Extracted planning content: {len(planning_stripped)} characters')
+            logger.debug(f'Planning preview (first 200 chars): {planning_stripped[:200]}...')
         if reasoning_stripped:
-            logger.info(f'Extracted reasoning trace: {len(reasoning_stripped)} characters')
+            logger.info(f'Extracted reasoning trace: {len(reasoning_stripped)} characters (will be minimized in context)')
             logger.debug(f'Reasoning preview (first 200 chars): {reasoning_stripped[:200]}...')
-        else:
-            logger.debug('No reasoning trace found in content')
+        if not planning_stripped and not reasoning_stripped:
+            logger.debug('No planning or reasoning tags found in content')
         
-        # For thinking models: if reasoning exists and tool calls were extracted from content,
-        # create a separate AgentThinkAction as the first action
-        # The reasoning trace IS the "think" tool call for thinking models
-        if reasoning_stripped and tool_calls_extracted_from_content:
-            logger.info(f'Creating AgentThinkAction from reasoning trace ({len(reasoning_stripped)} chars) - this represents the thinking model\'s reasoning process')
-            think_action = AgentThinkAction(thought=reasoning_stripped)
+        # For thinking models: prioritize planning content for AgentThinkAction
+        # Planning content is useful for context, reasoning is verbose and should be minimized
+        think_content = planning_stripped if planning_stripped else reasoning_stripped
+        
+        # Create AgentThinkAction from planning (preferred) or reasoning (fallback)
+        # Only create if we have content and tool calls were extracted from content
+        if think_content and tool_calls_extracted_from_content:
+            content_type = 'planning' if planning_stripped else 'reasoning'
+            logger.info(f'Creating AgentThinkAction from {content_type} content ({len(think_content)} chars)')
+            think_action = AgentThinkAction(thought=think_content)
             think_action.response_id = response.id
             actions.append(think_action)
-            logger.info(f'✅ Created AgentThinkAction for reasoning trace from thinking model (thought length: {len(reasoning_stripped)} chars)')
+            logger.info(f'✅ Created AgentThinkAction from {content_type} content (thought length: {len(think_content)} chars)')
+            
+            # Warn if we found planning but no tool calls (potential planning loop)
+            if planning_stripped and not tool_calls:
+                logger.warning('⚠️ Found planning content but no tool calls - model may be stuck in planning loop')
         
         # For regular models or when reasoning should be combined with thought:
-        # Combine reasoning with thought if present (but only if we didn't create a separate think action)
-        if reasoning_stripped and not tool_calls_extracted_from_content:
-            thought = f'{reasoning_stripped}\n{thought}' if thought else reasoning_stripped
+        # Combine planning/reasoning with thought if present (but only if we didn't create a separate think action)
+        if not tool_calls_extracted_from_content:
+            if planning_stripped:
+                thought = f'{planning_stripped}\n{thought}' if thought else planning_stripped
+            elif reasoning_stripped:
+                thought = f'{reasoning_stripped}\n{thought}' if thought else reasoning_stripped
 
         # Process each tool call to OpenHands action
         logger.info(f'Processing {len(tool_calls)} tool call(s) from response:')
