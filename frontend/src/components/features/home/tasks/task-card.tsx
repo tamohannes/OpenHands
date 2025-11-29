@@ -4,7 +4,7 @@ import { SuggestedTask } from "#/utils/types";
 import { useIsCreatingConversation } from "#/hooks/use-is-creating-conversation";
 import { useCreateConversation } from "#/hooks/mutation/use-create-conversation";
 import { TaskIssueNumber } from "./task-issue-number";
-import { useOptimisticUserMessage } from "#/hooks/use-optimistic-user-message";
+import { useOptimisticUserMessageStore } from "#/stores/optimistic-user-message-store";
 import { cn } from "#/utils/utils";
 
 const getTaskTypeMap = (
@@ -21,7 +21,7 @@ interface TaskCardProps {
 }
 
 export function TaskCard({ task }: TaskCardProps) {
-  const { setOptimisticUserMessage } = useOptimisticUserMessage();
+  const { setOptimisticUserMessage } = useOptimisticUserMessageStore();
   const { mutate: createConversation } = useCreateConversation();
   const isCreatingConversation = useIsCreatingConversation();
   const { t } = useTranslation();
@@ -56,6 +56,15 @@ export function TaskCard({ task }: TaskCardProps) {
     const issueType =
       task.task_type === "OPEN_ISSUE" ? "issues" : "pull-requests";
     href = `https://bitbucket.org/${task.repo}/${issueType}/${task.issue_number}`;
+  } else if (task.git_provider === "azure_devops") {
+    // Azure DevOps URL format: https://dev.azure.com/{organization}/{project}/_workitems/edit/{id}
+    // or https://dev.azure.com/{organization}/{project}/_git/{repo}/pullrequest/{id}
+    const azureDevOpsBaseUrl = "https://dev.azure.com";
+    if (task.task_type === "OPEN_ISSUE") {
+      href = `${azureDevOpsBaseUrl}/${task.repo}/_workitems/edit/${task.issue_number}`;
+    } else {
+      href = `${azureDevOpsBaseUrl}/${task.repo}/_git/${task.repo.split("/")[1]}/pullrequest/${task.issue_number}`;
+    }
   } else {
     const hrefType = task.task_type === "OPEN_ISSUE" ? "issues" : "pull";
     href = `https://github.com/${task.repo}/${hrefType}/${task.issue_number}`;

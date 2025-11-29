@@ -872,24 +872,99 @@ def response_to_actions(
                         f'Please check the tool name and retry with an existing tool.'
                     )
 
-                # We only add thought to the first action, and only if we didn't create a separate think action
-                # (for thinking models, reasoning is already in the separate think action)
-                # Note: reasoning_stripped is computed above before the loop
-                if i == 0 and not (tool_calls_extracted_from_content and reasoning_stripped):
-                    action = combine_thought(action, thought)
-                # Add metadata for tool calling
-                # Safely get tool_call.id (handle both dict and object access)
-                tool_call_id = getattr(tool_call, 'id', None)
-                if tool_call_id is None and isinstance(tool_call, dict):
-                    tool_call_id = tool_call.get('id', f'call_{uuid.uuid4().hex[:16]}')
-                elif tool_call_id is None:
-                    tool_call_id = f'call_{uuid.uuid4().hex[:16]}'
-                
-                action.tool_call_metadata = ToolCallMetadata(
-                    tool_call_id=tool_call_id,
-                    function_name=function_name,
-                    model_response=response,
-                    total_calls_in_response=len(tool_calls),
+                    for key, value in other_kwargs.items():
+                        if key in valid_params:
+                            # security_risk is valid but should NOT be part of editor kwargs
+                            if key != 'security_risk':
+                                valid_kwargs_for_editor[key] = value
+                        else:
+                            raise FunctionCallValidationError(
+                                f'Unexpected argument {key} in tool call {tool_call.function.name}. Allowed arguments are: {valid_params}'
+                            )
+
+                    action = FileEditAction(
+                        path=path,
+                        command=command,
+                        impl_source=FileEditSource.OH_ACI,
+                        **valid_kwargs_for_editor,
+                    )
+
+                set_security_risk(action, arguments)
+            # ================================================
+            # AgentThinkAction
+            # ================================================
+            elif tool_call.function.name == ThinkTool['function']['name']:
+                action = AgentThinkAction(thought=arguments.get('thought', ''))
+
+            # ================================================
+            # CondensationRequestAction
+            # ================================================
+            elif tool_call.function.name == CondensationRequestTool['function']['name']:
+                action = CondensationRequestAction()
+
+            # ================================================
+            # BrowserTool
+            # ================================================
+            elif tool_call.function.name == BrowserTool['function']['name']:
+                if 'code' not in arguments:
+                    raise FunctionCallValidationError(
+                        f'Missing required argument "code" in tool call {tool_call.function.name}'
+                    )
+                action = BrowseInteractiveAction(browser_actions=arguments['code'])
+                set_security_risk(action, arguments)
+
+            # ================================================
+            # TaskTrackingAction
+            # ================================================
+            elif tool_call.function.name == TASK_TRACKER_TOOL_NAME:
+                if 'command' not in arguments:
+                    raise FunctionCallValidationError(
+                        f'Missing required argument "command" in tool call {tool_call.function.name}'
+                    )
+                if arguments['command'] == 'plan' and 'task_list' not in arguments:
+                    raise FunctionCallValidationError(
+                        f'Missing required argument "task_list" for "plan" command in tool call {tool_call.function.name}'
+                    )
+
+                raw_task_list = arguments.get('task_list', [])
+                if not isinstance(raw_task_list, list):
+                    raise FunctionCallValidationError(
+                        f'Invalid format for "task_list". Expected a list but got {type(raw_task_list)}.'
+                    )
+
+                # Normalize task_list to ensure it's always a list of dictionaries
+                normalized_task_list = []
+                for i, task in enumerate(raw_task_list):
+                    if isinstance(task, dict):
+                        # Task is already in correct format, ensure required fields exist
+                        normalized_task = {
+                            'id': task.get('id', f'task-{i + 1}'),
+                            'title': task.get('title', 'Untitled task'),
+                            'status': task.get('status', 'todo'),
+                            'notes': task.get('notes', ''),
+                        }
+                    else:
+                        # Unexpected format, raise validation error
+                        logger.warning(
+                            f'Unexpected task format in task_list: {type(task)} - {task}'
+                        )
+                        raise FunctionCallValidationError(
+                            f'Unexpected task format in task_list: {type(task)}. Each task should be a dictionary.'
+                        )
+                    normalized_task_list.append(normalized_task)
+
+                action = TaskTrackingAction(
+                    command=arguments['command'],
+                    task_list=normalized_task_list,
+                )
+
+            # ================================================
+            # MCPAction (MCP)
+            # ================================================
+            elif mcp_tool_names and tool_call.function.name in mcp_tool_names:
+                action = MCPAction(
+                    name=tool_call.function.name,
+                    arguments=arguments,
                 )
                 actions.append(action)
                 logger.info(f'  ✅ [{i+1}/{len(tool_calls)}] Successfully created {type(action).__name__} for tool: {function_name}')

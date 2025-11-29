@@ -31,7 +31,7 @@ from server.utils.conversation_callback_utils import register_callback_processor
 from openhands.core.logger import openhands_logger as logger
 from openhands.integrations.provider import ProviderToken, ProviderType
 from openhands.server.types import LLMAuthenticationError, MissingSettingsError
-from openhands.storage.data_models.user_secrets import UserSecrets
+from openhands.storage.data_models.secrets import Secrets
 from openhands.utils.async_utils import call_sync_from_async
 
 
@@ -250,7 +250,7 @@ class GithubManager(Manager):
                     f'[GitHub] Creating new conversation for user {user_info.username}'
                 )
 
-                secret_store = UserSecrets(
+                secret_store = Secrets(
                     provider_tokens=MappingProxyType(
                         {
                             ProviderType.GITHUB: ProviderToken(
@@ -292,18 +292,26 @@ class GithubManager(Manager):
                     f'[GitHub] Created conversation {conversation_id} for user {user_info.username}'
                 )
 
-                # Create a GithubCallbackProcessor
-                processor = GithubCallbackProcessor(
-                    github_view=github_view,
-                    send_summary_instruction=True,
-                )
+                from openhands.server.shared import ConversationStoreImpl, config
 
-                # Register the callback processor
-                register_callback_processor(conversation_id, processor)
-
-                logger.info(
-                    f'[Github] Registered callback processor for conversation {conversation_id}'
+                conversation_store = await ConversationStoreImpl.get_instance(
+                    config, github_view.user_info.keycloak_user_id
                 )
+                metadata = await conversation_store.get_metadata(conversation_id)
+
+                if metadata.conversation_version != 'v1':
+                    # Create a GithubCallbackProcessor
+                    processor = GithubCallbackProcessor(
+                        github_view=github_view,
+                        send_summary_instruction=True,
+                    )
+
+                    # Register the callback processor
+                    register_callback_processor(conversation_id, processor)
+
+                    logger.info(
+                        f'[Github] Registered callback processor for conversation {conversation_id}'
+                    )
 
                 # Send message with conversation link
                 conversation_link = CONVERSATION_URL.format(conversation_id)

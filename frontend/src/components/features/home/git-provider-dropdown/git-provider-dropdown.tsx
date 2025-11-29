@@ -51,6 +51,8 @@ export function GitProviderDropdown({
         return "GitLab";
       case "bitbucket":
         return "Bitbucket";
+      case "azure_devops":
+        return "Azure DevOps";
       case "enterprise_sso":
         return "Enterprise SSO";
       default:
@@ -134,7 +136,6 @@ export function GitProviderDropdown({
       key={item}
       item={item}
       index={index}
-      isHighlighted={index === currentHighlightedIndex}
       isSelected={item === currentSelectedItem}
       getItemProps={currentGetItemProps}
       getDisplayText={formatProviderName}

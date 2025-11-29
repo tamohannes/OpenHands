@@ -1,5 +1,5 @@
 ARG OPENHANDS_BUILD_VERSION=dev
-FROM node:24.3.0-bookworm-slim AS frontend-builder
+FROM node:24.8-trixie-slim AS frontend-builder
 
 WORKDIR /app
 
@@ -9,7 +9,7 @@ RUN npm ci
 COPY frontend ./
 RUN npm run build
 
-FROM python:3.12.10-slim AS base
+FROM python:3.13.7-slim-trixie AS base
 FROM base AS backend-builder
 
 WORKDIR /app
@@ -73,7 +73,7 @@ ENV VIRTUAL_ENV=/app/.venv \
 
 COPY --chown=openhands:openhands --chmod=770 --from=backend-builder ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
-COPY --chown=openhands:openhands --chmod=770 ./microagents ./microagents
+COPY --chown=openhands:openhands --chmod=770 ./skills ./skills
 COPY --chown=openhands:openhands --chmod=770 ./openhands ./openhands
 COPY --chown=openhands:openhands --chmod=777 ./openhands/runtime/plugins ./openhands/runtime/plugins
 COPY --chown=openhands:openhands pyproject.toml poetry.lock README.md MANIFEST.in LICENSE ./

@@ -1,43 +1,28 @@
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { renderWithQueryAndI18n } from "test-utils";
+import { renderWithProviders } from "test-utils";
 import { ServerStatus } from "#/components/features/controls/server-status";
 import { ServerStatusContextMenu } from "#/components/features/controls/server-status-context-menu";
 import { ConversationStatus } from "#/types/conversation-status";
 import { AgentState } from "#/types/agent-state";
-import { useAgentStore } from "#/stores/agent-store";
+import { useAgentState } from "#/hooks/use-agent-state";
 
-// Mock the agent store
-vi.mock("#/stores/agent-store", () => ({
-  useAgentStore: vi.fn(),
+// Mock the agent state hook
+vi.mock("#/hooks/use-agent-state", () => ({
+  useAgentState: vi.fn(),
 }));
 
-// Mock the custom hooks
-const mockStartConversationMutate = vi.fn();
-const mockStopConversationMutate = vi.fn();
-
-vi.mock("#/hooks/mutation/use-start-conversation", () => ({
-  useStartConversation: () => ({
-    mutate: mockStartConversationMutate,
-  }),
-}));
-
-vi.mock("#/hooks/mutation/use-stop-conversation", () => ({
-  useStopConversation: () => ({
-    mutate: mockStopConversationMutate,
-  }),
-}));
-
-vi.mock("#/hooks/use-conversation-id", () => ({
-  useConversationId: () => ({
+vi.mock("#/hooks/query/use-task-polling", () => ({
+  useTaskPolling: () => ({
+    isTask: false,
+    taskId: null,
     conversationId: "test-conversation-id",
-  }),
-}));
-
-vi.mock("#/hooks/use-user-providers", () => ({
-  useUserProviders: () => ({
-    providers: [],
+    task: null,
+    taskStatus: null,
+    taskDetail: null,
+    taskError: null,
+    isLoadingTask: false,
   }),
 }));
 
@@ -53,8 +38,12 @@ vi.mock("react-i18next", async () => {
           COMMON$SERVER_STOPPED: "Server Stopped",
           COMMON$ERROR: "Error",
           COMMON$STARTING: "Starting",
+          COMMON$STOPPING: "Stopping...",
           COMMON$STOP_RUNTIME: "Stop Runtime",
           COMMON$START_RUNTIME: "Start Runtime",
+          CONVERSATION$ERROR_STARTING_CONVERSATION:
+            "Error starting conversation",
+          CONVERSATION$READY: "Ready",
         };
         return translations[key] || key;
       },
@@ -66,12 +55,10 @@ vi.mock("react-i18next", async () => {
 });
 
 describe("ServerStatus", () => {
-  // Helper function to mock agent store with specific state
+  // Helper function to mock agent state with specific state
   const mockAgentStore = (agentState: AgentState) => {
-    vi.mocked(useAgentStore).mockReturnValue({
+    vi.mocked(useAgentState).mockReturnValue({
       curAgentState: agentState,
-      setCurrentAgentState: vi.fn(),
-      reset: vi.fn(),
     });
   };
 
@@ -79,185 +66,91 @@ describe("ServerStatus", () => {
     vi.clearAllMocks();
   });
 
-  it("should render server status with different conversation statuses", () => {
-    // Mock agent store to return RUNNING state
+  it("should render server status with RUNNING conversation status", () => {
     mockAgentStore(AgentState.RUNNING);
 
-    // Test RUNNING status
-    const { rerender } = renderWithQueryAndI18n(
-      <ServerStatus conversationStatus="RUNNING" />,
-    );
-    expect(screen.getByText("Running")).toBeInTheDocument();
+    renderWithProviders(<ServerStatus conversationStatus="RUNNING" />);
 
-    // Test STOPPED status
-    rerender(<ServerStatus conversationStatus="STOPPED" />);
+    expect(screen.getByTestId("server-status")).toBeInTheDocument();
+    expect(screen.getByText("Running")).toBeInTheDocument();
+  });
+
+  it("should render server status with STOPPED conversation status", () => {
+    mockAgentStore(AgentState.RUNNING);
+
+    renderWithProviders(<ServerStatus conversationStatus="STOPPED" />);
+
+    expect(screen.getByTestId("server-status")).toBeInTheDocument();
     expect(screen.getByText("Server Stopped")).toBeInTheDocument();
-
-    // Test STARTING status (shows "Running" due to agent state being RUNNING)
-    rerender(<ServerStatus conversationStatus="STARTING" />);
-    expect(screen.getByText("Running")).toBeInTheDocument();
-
-    // Test null status (shows "Running" due to agent state being RUNNING)
-    rerender(<ServerStatus conversationStatus={null} />);
-    expect(screen.getByText("Running")).toBeInTheDocument();
   });
 
-  it("should show context menu when clicked with RUNNING status", async () => {
-    const user = userEvent.setup();
+  it("should render STARTING status when agent state is LOADING", () => {
+    mockAgentStore(AgentState.LOADING);
 
-    // Mock agent store to return RUNNING state
+    renderWithProviders(<ServerStatus conversationStatus="STARTING" />);
+
+    expect(screen.getByTestId("server-status")).toBeInTheDocument();
+    expect(screen.getByText("Starting")).toBeInTheDocument();
+  });
+
+  it("should render STARTING status when agent state is INIT", () => {
+    mockAgentStore(AgentState.INIT);
+
+    renderWithProviders(<ServerStatus conversationStatus="STARTING" />);
+
+    expect(screen.getByTestId("server-status")).toBeInTheDocument();
+    expect(screen.getByText("Starting")).toBeInTheDocument();
+  });
+
+  it("should render ERROR status when agent state is ERROR", () => {
+    mockAgentStore(AgentState.ERROR);
+
+    renderWithProviders(<ServerStatus conversationStatus="RUNNING" />);
+
+    expect(screen.getByTestId("server-status")).toBeInTheDocument();
+    expect(screen.getByText("Error")).toBeInTheDocument();
+  });
+
+  it("should render STOPPING status when isPausing is true", () => {
     mockAgentStore(AgentState.RUNNING);
 
-    renderWithQueryAndI18n(<ServerStatus conversationStatus="RUNNING" />);
+    renderWithProviders(
+      <ServerStatus conversationStatus="RUNNING" isPausing={true} />,
+    );
 
-    const statusContainer = screen.getByText("Running").closest("div");
-    expect(statusContainer).toBeInTheDocument();
-
-    await user.click(statusContainer!);
-
-    // Context menu should appear
-    expect(
-      screen.getByTestId("server-status-context-menu"),
-    ).toBeInTheDocument();
-    expect(screen.getByTestId("stop-server-button")).toBeInTheDocument();
-  });
-
-  it("should show context menu when clicked with STOPPED status", async () => {
-    const user = userEvent.setup();
-
-    // Mock agent store to return STOPPED state
-    mockAgentStore(AgentState.STOPPED);
-
-    renderWithQueryAndI18n(<ServerStatus conversationStatus="STOPPED" />);
-
-    const statusContainer = screen.getByText("Server Stopped").closest("div");
-    expect(statusContainer).toBeInTheDocument();
-
-    await user.click(statusContainer!);
-
-    // Context menu should appear
-    expect(
-      screen.getByTestId("server-status-context-menu"),
-    ).toBeInTheDocument();
-    expect(screen.getByTestId("start-server-button")).toBeInTheDocument();
-  });
-
-  it("should not show context menu when clicked with other statuses", async () => {
-    const user = userEvent.setup();
-
-    // Mock agent store to return RUNNING state
-    mockAgentStore(AgentState.RUNNING);
-
-    renderWithQueryAndI18n(<ServerStatus conversationStatus="STARTING" />);
-
-    const statusContainer = screen.getByText("Running").closest("div");
-    expect(statusContainer).toBeInTheDocument();
-
-    await user.click(statusContainer!);
-
-    // Context menu should not appear
-    expect(
-      screen.queryByTestId("server-status-context-menu"),
-    ).not.toBeInTheDocument();
-  });
-
-  it("should call stop conversation mutation when stop server is clicked", async () => {
-    const user = userEvent.setup();
-
-    // Clear previous calls
-    mockStopConversationMutate.mockClear();
-
-    // Mock agent store to return RUNNING state
-    mockAgentStore(AgentState.RUNNING);
-
-    renderWithQueryAndI18n(<ServerStatus conversationStatus="RUNNING" />);
-
-    const statusContainer = screen.getByText("Running").closest("div");
-    await user.click(statusContainer!);
-
-    const stopButton = screen.getByTestId("stop-server-button");
-    await user.click(stopButton);
-
-    expect(mockStopConversationMutate).toHaveBeenCalledWith({
-      conversationId: "test-conversation-id",
-    });
-  });
-
-  it("should call start conversation mutation when start server is clicked", async () => {
-    const user = userEvent.setup();
-
-    // Clear previous calls
-    mockStartConversationMutate.mockClear();
-
-    // Mock agent store to return STOPPED state
-    mockAgentStore(AgentState.STOPPED);
-
-    renderWithQueryAndI18n(<ServerStatus conversationStatus="STOPPED" />);
-
-    const statusContainer = screen.getByText("Server Stopped").closest("div");
-    await user.click(statusContainer!);
-
-    const startButton = screen.getByTestId("start-server-button");
-    await user.click(startButton);
-
-    expect(mockStartConversationMutate).toHaveBeenCalledWith({
-      conversationId: "test-conversation-id",
-      providers: [],
-    });
-  });
-
-  it("should close context menu after stop server action", async () => {
-    const user = userEvent.setup();
-
-    // Mock agent store to return RUNNING state
-    mockAgentStore(AgentState.RUNNING);
-
-    renderWithQueryAndI18n(<ServerStatus conversationStatus="RUNNING" />);
-
-    const statusContainer = screen.getByText("Running").closest("div");
-    await user.click(statusContainer!);
-
-    const stopButton = screen.getByTestId("stop-server-button");
-    await user.click(stopButton);
-
-    // Context menu should be closed (handled by the component)
-    expect(mockStopConversationMutate).toHaveBeenCalledWith({
-      conversationId: "test-conversation-id",
-    });
-  });
-
-  it("should close context menu after start server action", async () => {
-    const user = userEvent.setup();
-
-    // Mock agent store to return STOPPED state
-    mockAgentStore(AgentState.STOPPED);
-
-    renderWithQueryAndI18n(<ServerStatus conversationStatus="STOPPED" />);
-
-    const statusContainer = screen.getByText("Server Stopped").closest("div");
-    await user.click(statusContainer!);
-
-    const startButton = screen.getByTestId("start-server-button");
-    await user.click(startButton);
-
-    // Context menu should be closed
-    expect(
-      screen.queryByTestId("server-status-context-menu"),
-    ).not.toBeInTheDocument();
+    expect(screen.getByTestId("server-status")).toBeInTheDocument();
+    expect(screen.getByText("Stopping...")).toBeInTheDocument();
   });
 
   it("should handle null conversation status", () => {
-    // Mock agent store to return RUNNING state
     mockAgentStore(AgentState.RUNNING);
 
-    renderWithQueryAndI18n(<ServerStatus conversationStatus={null} />);
+    renderWithProviders(<ServerStatus conversationStatus={null} />);
 
-    const statusText = screen.getByText("Running");
-    expect(statusText).toBeInTheDocument();
+    expect(screen.getByTestId("server-status")).toBeInTheDocument();
+    expect(screen.getByText("Running")).toBeInTheDocument();
+  });
+
+  it("should apply custom className", () => {
+    mockAgentStore(AgentState.RUNNING);
+
+    renderWithProviders(
+      <ServerStatus conversationStatus="RUNNING" className="custom-class" />,
+    );
+
+    const container = screen.getByTestId("server-status");
+    expect(container).toHaveClass("custom-class");
   });
 });
 
 describe("ServerStatusContextMenu", () => {
+  // Helper function to mock agent state with specific state
+  const mockAgentStore = (agentState: AgentState) => {
+    vi.mocked(useAgentState).mockReturnValue({
+      curAgentState: agentState,
+    });
+  };
+
   const defaultProps = {
     onClose: vi.fn(),
     conversationStatus: "RUNNING" as ConversationStatus,
@@ -268,7 +161,9 @@ describe("ServerStatusContextMenu", () => {
   });
 
   it("should render stop server button when status is RUNNING", () => {
-    renderWithQueryAndI18n(
+    mockAgentStore(AgentState.RUNNING);
+
+    renderWithProviders(
       <ServerStatusContextMenu
         {...defaultProps}
         conversationStatus="RUNNING"
@@ -276,12 +171,15 @@ describe("ServerStatusContextMenu", () => {
       />,
     );
 
+    expect(screen.getByTestId("server-status")).toBeInTheDocument();
     expect(screen.getByTestId("stop-server-button")).toBeInTheDocument();
     expect(screen.getByText("Stop Runtime")).toBeInTheDocument();
   });
 
   it("should render start server button when status is STOPPED", () => {
-    renderWithQueryAndI18n(
+    mockAgentStore(AgentState.RUNNING);
+
+    renderWithProviders(
       <ServerStatusContextMenu
         {...defaultProps}
         conversationStatus="STOPPED"
@@ -289,37 +187,45 @@ describe("ServerStatusContextMenu", () => {
       />,
     );
 
+    expect(screen.getByTestId("server-status")).toBeInTheDocument();
     expect(screen.getByTestId("start-server-button")).toBeInTheDocument();
     expect(screen.getByText("Start Runtime")).toBeInTheDocument();
   });
 
   it("should not render stop server button when onStopServer is not provided", () => {
-    renderWithQueryAndI18n(
+    mockAgentStore(AgentState.RUNNING);
+
+    renderWithProviders(
       <ServerStatusContextMenu
         {...defaultProps}
         conversationStatus="RUNNING"
       />,
     );
 
+    expect(screen.getByTestId("server-status")).toBeInTheDocument();
     expect(screen.queryByTestId("stop-server-button")).not.toBeInTheDocument();
   });
 
   it("should not render start server button when onStartServer is not provided", () => {
-    renderWithQueryAndI18n(
+    mockAgentStore(AgentState.RUNNING);
+
+    renderWithProviders(
       <ServerStatusContextMenu
         {...defaultProps}
         conversationStatus="STOPPED"
       />,
     );
 
+    expect(screen.getByTestId("server-status")).toBeInTheDocument();
     expect(screen.queryByTestId("start-server-button")).not.toBeInTheDocument();
   });
 
   it("should call onStopServer when stop button is clicked", async () => {
     const user = userEvent.setup();
     const onStopServer = vi.fn();
+    mockAgentStore(AgentState.RUNNING);
 
-    renderWithQueryAndI18n(
+    renderWithProviders(
       <ServerStatusContextMenu
         {...defaultProps}
         conversationStatus="RUNNING"
@@ -336,8 +242,9 @@ describe("ServerStatusContextMenu", () => {
   it("should call onStartServer when start button is clicked", async () => {
     const user = userEvent.setup();
     const onStartServer = vi.fn();
+    mockAgentStore(AgentState.RUNNING);
 
-    renderWithQueryAndI18n(
+    renderWithProviders(
       <ServerStatusContextMenu
         {...defaultProps}
         conversationStatus="STOPPED"
@@ -352,7 +259,9 @@ describe("ServerStatusContextMenu", () => {
   });
 
   it("should render correct text content for stop server button", () => {
-    renderWithQueryAndI18n(
+    mockAgentStore(AgentState.RUNNING);
+
+    renderWithProviders(
       <ServerStatusContextMenu
         {...defaultProps}
         conversationStatus="RUNNING"
@@ -366,7 +275,9 @@ describe("ServerStatusContextMenu", () => {
   });
 
   it("should render correct text content for start server button", () => {
-    renderWithQueryAndI18n(
+    mockAgentStore(AgentState.RUNNING);
+
+    renderWithProviders(
       <ServerStatusContextMenu
         {...defaultProps}
         conversationStatus="STOPPED"
@@ -381,8 +292,9 @@ describe("ServerStatusContextMenu", () => {
 
   it("should call onClose when context menu is closed", () => {
     const onClose = vi.fn();
+    mockAgentStore(AgentState.RUNNING);
 
-    renderWithQueryAndI18n(
+    renderWithProviders(
       <ServerStatusContextMenu
         {...defaultProps}
         onClose={onClose}
@@ -397,13 +309,16 @@ describe("ServerStatusContextMenu", () => {
   });
 
   it("should not render any buttons for other conversation statuses", () => {
-    renderWithQueryAndI18n(
+    mockAgentStore(AgentState.RUNNING);
+
+    renderWithProviders(
       <ServerStatusContextMenu
         {...defaultProps}
         conversationStatus="STARTING"
       />,
     );
 
+    expect(screen.getByTestId("server-status")).toBeInTheDocument();
     expect(screen.queryByTestId("stop-server-button")).not.toBeInTheDocument();
     expect(screen.queryByTestId("start-server-button")).not.toBeInTheDocument();
   });

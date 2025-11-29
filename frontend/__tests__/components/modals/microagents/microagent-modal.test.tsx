@@ -1,15 +1,15 @@
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { renderWithQueryAndI18n } from "test-utils";
+import { renderWithProviders } from "test-utils";
 import { MicroagentsModal } from "#/components/features/conversation-panel/microagents-modal";
 import ConversationService from "#/api/conversation-service/conversation-service.api";
 import { AgentState } from "#/types/agent-state";
-import { useAgentStore } from "#/stores/agent-store";
+import { useAgentState } from "#/hooks/use-agent-state";
 
-// Mock the agent store
-vi.mock("#/stores/agent-store", () => ({
-  useAgentStore: vi.fn(),
+// Mock the agent state hook
+vi.mock("#/hooks/use-agent-state", () => ({
+  useAgentState: vi.fn(),
 }));
 
 // Mock the conversation ID hook
@@ -50,11 +50,9 @@ describe("MicroagentsModal - Refresh Button", () => {
       microagents: mockMicroagents,
     });
 
-    // Mock the agent store to return a ready state
-    vi.mocked(useAgentStore).mockReturnValue({
+    // Mock the agent state to return a ready state
+    vi.mocked(useAgentState).mockReturnValue({
       curAgentState: AgentState.AWAITING_USER_INPUT,
-      setCurrentAgentState: vi.fn(),
-      reset: vi.fn(),
     });
   });
 
@@ -64,7 +62,7 @@ describe("MicroagentsModal - Refresh Button", () => {
 
   describe("Refresh Button Rendering", () => {
     it("should render the refresh button with correct text and test ID", async () => {
-      renderWithQueryAndI18n(<MicroagentsModal {...defaultProps} />);
+      renderWithProviders(<MicroagentsModal {...defaultProps} />);
 
       // Wait for the component to load and render the refresh button
       const refreshButton = await screen.findByTestId("refresh-microagents");
@@ -77,7 +75,7 @@ describe("MicroagentsModal - Refresh Button", () => {
     it("should call refetch when refresh button is clicked", async () => {
       const user = userEvent.setup();
 
-      renderWithQueryAndI18n(<MicroagentsModal {...defaultProps} />);
+      renderWithProviders(<MicroagentsModal {...defaultProps} />);
 
       const refreshSpy = vi.spyOn(ConversationService, "getMicroagents");
 

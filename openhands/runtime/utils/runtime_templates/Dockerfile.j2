@@ -24,14 +24,10 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         wget curl ca-certificates sudo apt-utils git jq tmux build-essential ripgrep ffmpeg \
         coreutils util-linux procps findutils grep sed \
-        {%- if (base_image.endswith(':latest') or base_image.endswith(':24.04') or ('mswebench' in base_image)) -%}
-        libgl1 \
-        {%- else %}
-        libgl1-mesa-glx \
-        {% endif -%}
-        libasound2-plugins libatomic1 \
+        libasound2-plugins libatomic1 && \
+        (apt-get install -y --no-install-recommends libgl1 || apt-get install -y --no-install-recommends libgl1-mesa-glx) && \
         # Install Docker dependencies
-        apt-transport-https ca-certificates curl gnupg lsb-release && \
+        apt-get install -y --no-install-recommends apt-transport-https ca-certificates curl gnupg lsb-release && \
     curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     TZ=Etc/UTC DEBIAN_FRONTEND=noninteractive \
         {%- if ('mswebench' in base_image) -%}
@@ -46,10 +42,10 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         wget curl ca-certificates sudo apt-utils git jq tmux build-essential ripgrep ffmpeg \
         coreutils util-linux procps findutils grep sed \
-        libgl1-mesa-glx \
-        libasound2-plugins libatomic1 \
+        libasound2-plugins libatomic1 && \
+    (apt-get install -y --no-install-recommends libgl1 || apt-get install -y --no-install-recommends libgl1-mesa-glx) && \
         # Install Docker dependencies
-        apt-transport-https ca-certificates curl gnupg lsb-release
+    apt-get install -y --no-install-recommends apt-transport-https ca-certificates curl gnupg lsb-release
 {% endif %}
 
 {% if (('ubuntu' in base_image) or ('mswebench' in base_image)) %}
@@ -340,8 +336,8 @@ RUN \
 # ================================================================
 RUN if [ -d /openhands/code/openhands ]; then rm -rf /openhands/code/openhands; fi
 COPY --chown=openhands:openhands ./code/pyproject.toml ./code/poetry.lock /openhands/code/
-RUN if [ -d /openhands/code/microagents ]; then rm -rf /openhands/code/microagents; fi
-COPY --chown=openhands:openhands ./code/microagents /openhands/code/microagents
+RUN if [ -d /openhands/code/skills ]; then rm -rf /openhands/code/skills; fi
+COPY --chown=openhands:openhands ./code/skills /openhands/code/skills
 COPY --chown=openhands:openhands ./code/openhands /openhands/code/openhands
 RUN chmod a+rwx /openhands/code/openhands/__init__.py && \
     chown -R openhands:openhands /openhands/code

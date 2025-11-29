@@ -31,7 +31,13 @@ interface ConversationSubscriptionsContextType {
   subscribeToConversation: (options: {
     conversationId: string;
     sessionApiKey: string | null;
-    providersSet: ("github" | "gitlab" | "bitbucket" | "enterprise_sso")[];
+    providersSet: (
+      | "github"
+      | "gitlab"
+      | "bitbucket"
+      | "azure_devops"
+      | "enterprise_sso"
+    )[];
     baseUrl: string;
     socketPath?: string;
     onEvent?: (event: unknown, conversationId: string) => void;
@@ -135,7 +141,13 @@ export function ConversationSubscriptionsProvider({
     (options: {
       conversationId: string;
       sessionApiKey: string | null;
-      providersSet: ("github" | "gitlab" | "bitbucket" | "enterprise_sso")[];
+      providersSet: (
+        | "github"
+        | "gitlab"
+        | "bitbucket"
+        | "azure_devops"
+        | "enterprise_sso"
+      )[];
       baseUrl: string;
       socketPath?: string;
       onEvent?: (event: unknown, conversationId: string) => void;
@@ -275,7 +287,7 @@ export function ConversationSubscriptionsProvider({
         setActiveConversationIds((prev) =>
           prev.includes(conversationId) ? prev : [...prev, conversationId],
         );
-      } catch (error) {
+      } catch {
         // Clean up the event handler if there was an error
         delete eventHandlersRef.current[conversationId];
       }
