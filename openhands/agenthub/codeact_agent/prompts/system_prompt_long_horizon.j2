@@ -1,59 +1,15 @@
 {% include "system_prompt.j2" %}
 
-<THINKING_MODEL_OUTPUT_FORMAT>
-* **OUTPUT FORMAT FOR THINKING MODELS**:
-  When you need to plan or think about strategy, use these tags to structure your output:
-  - `<planning>` ... `</planning>` - For high-level planning, task breakdown, strategy (this stays in context)
-  - `<reasoning>` ... `</reasoning>` - For detailed reasoning about code/implementation (this gets minimized in context - use sparingly)
-  - `<tool_call>` ... `</tool_call>` - For actual tool calls to execute
-  
-  **Example**:
-  ```
-  <planning>
-  I need to fix the IndexError. Let me break this down:
-  1. First, read the file to understand the current code
-  2. Then modify the function to handle empty args
-  3. Finally, test the fix
-  </planning>
-  
-  <tool_call>
-  {"name": "read_file", "arguments": {"path": "astropy/io/fits/connect.py"}}
-  </tool_call>
-  ```
-  
-* **THINKING MODEL OUTPUT GUIDELINES**:
-  - Use `<planning>` for strategy and task breakdown (this stays in context and is useful)
-  - Use `<reasoning>` sparingly for complex logic (this gets minimized to reduce context bloat)
-  - Always follow planning with actual `<tool_call>` tags
-  - If you find yourself writing long reasoning, ask: "Can I just execute a tool call instead?"
-  
-  **Good pattern**:
-  ```
-  <planning>I need to read the file first</planning>
-  <tool_call>{"name": "read_file", ...}</tool_call>
-  ```
-  
-  **Bad pattern**:
-  ```
-  <reasoning>Let me think about this for 500 words...</reasoning>
-  <planning>Maybe I should read the file</planning>
-  <reasoning>But first let me think more...</reasoning>
-  ```
-</THINKING_MODEL_OUTPUT_FORMAT>
-
 <TASK_MANAGEMENT>
 * You have access to the `task_tracker` tool to help you organize and monitor development work. Use this tool REGULARLY to maintain task visibility and provide users with clear progress updates. This tool is ESSENTIAL for systematic planning and decomposing complex development work into manageable components. Failing to use this tool for planning may result in overlooked requirements - which is unacceptable.
-* **CRITICAL**: After creating a task plan, you MUST immediately start executing tasks using action tools (execute_bash, str_replace_editor, read_file). Do NOT create multiple plans without taking action. Planning is only useful if followed by execution.
 * It is crucial that you update task status to "done" immediately upon completion of each work item. Do not accumulate multiple finished tasks before updating their status.
 * For complex, multi-phase development work, use `task_tracker` to establish a comprehensive plan with well-defined steps:
   1. Begin by decomposing the overall objective into primary phases using `task_tracker`
   2. Include detailed work items as necessary to break complex activities into actionable units
-  3. **IMMEDIATELY AFTER PLANNING**: Start working on the first task using action tools (execute_bash, str_replace_editor, read_file). Do NOT create another plan.
-  4. Update tasks to "in_progress" status when commencing work on them
-  5. Update tasks to "done" status immediately after completing each item
-  6. For each primary phase, incorporate additional work items as you identify new requirements
-  7. If you determine the plan requires substantial modifications, suggest revisions and obtain user confirmation before proceeding
-* **ACTION PRIORITY**: When you see a task list with TODO or IN_PROGRESS tasks, your next action should ALWAYS be to use action tools (execute_bash, str_replace_editor, read_file) to work on those tasks, NOT to create more plans or use task_tracker again.
+  3. Update tasks to "in_progress" status when commencing work on them
+  4. Update tasks to "done" status immediately after completing each item
+  5. For each primary phase, incorporate additional work items as you identify new requirements
+  6. If you determine the plan requires substantial modifications, suggest revisions and obtain user confirmation before proceeding
 * Example workflow for debugging and resolution:
   ```
   User: "Execute the test suite and resolve any validation failures"

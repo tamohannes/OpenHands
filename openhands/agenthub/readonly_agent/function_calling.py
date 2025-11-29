@@ -4,9 +4,7 @@ This is similar to the functionality of `CodeActResponseParser`.
 """
 
 import json
-import re
 import shlex
-import uuid
 
 from litellm import (
     ChatCompletionToolParam,
@@ -15,15 +13,11 @@ from litellm import (
 
 from openhands.agenthub.codeact_agent.function_calling import (
     combine_thought,
-    extract_planning_from_content,
-    extract_tool_calls_from_content,
-    extract_reasoning_from_content,
 )
 from openhands.agenthub.codeact_agent.tools import (
     FinishTool,
     ThinkTool,
 )
-from openhands.llm.tool_names import STR_REPLACE_EDITOR_TOOL_NAME
 from openhands.agenthub.readonly_agent.tools import (
     GlobTool,
     GrepTool,
@@ -113,31 +107,6 @@ def glob_to_cmdrun(pattern: str, path: str = '.') -> str:
     return echo_cmd + complete_cmd
 
 
-def remove_tool_call_tags(content: str) -> str:
-    """Remove <tool_call>...</tool_call> tags from content.
-    
-    This is used after extracting tool calls from thinking model responses
-    to ensure the tool_call tags don't appear in message content.
-    
-    Args:
-        content: The content string that may contain <tool_call> tags
-        
-    Returns:
-        Content with all <tool_call> tags removed
-    """
-    if not content or not isinstance(content, str):
-        return content
-    
-    # Pattern to match <tool_call>...</tool_call> tags (handles multi-line)
-    pattern = r'<tool_call>\s*.*?\s*</tool_call>'
-    cleaned_content = re.sub(pattern, '', content, flags=re.DOTALL)
-    
-    # Clean up extra whitespace
-    cleaned_content = re.sub(r'\n\s*\n', '\n', cleaned_content).strip()
-    
-    return cleaned_content
-
-
 def response_to_actions(
     response: ModelResponse, mcp_tool_names: list[str] | None = None
 ) -> list[Action]:
@@ -145,178 +114,31 @@ def response_to_actions(
     assert len(response.choices) == 1, 'Only one choice is supported for now'
     choice = response.choices[0]
     assistant_msg = choice.message
-    
-    # Get tool calls from the standard tool_calls field
-    tool_calls = getattr(assistant_msg, 'tool_calls', None) or []
-    
-    # Track if tool calls were extracted from content (thinking model case)
-    tool_calls_extracted_from_content = False
-    
-    # Initialize variables for reasoning extraction (needed for summary logging)
-    reasoning_stripped = ''
-    
-    # Get content string for processing
-    content_str = ''
-    if isinstance(assistant_msg.content, str):
-        content_str = assistant_msg.content
-    elif isinstance(assistant_msg.content, list):
-        for msg in assistant_msg.content:
-            if isinstance(msg, dict) and msg.get('type') == 'text':
-                content_str += msg.get('text', '')
-            elif isinstance(msg, str):
-                content_str += msg
-    
-    logger.debug(f'Content type: {type(assistant_msg.content)}, Content length: {len(content_str)}')
-    logger.debug(f'Standard tool_calls field: {len(tool_calls) if tool_calls else 0} tool call(s)')
-    
-    # If no tool calls in standard field, check content for embedded tool calls
-    # This handles thinking models that output tool calls in content
-    # Format: [reasoning]</think><tool_call>{json}</tool_call>
-    if not tool_calls and content_str:
-        # Check for tool call tags in content
-        has_tool_call_tags = '<tool_call>' in content_str or '</tool_call>' in content_str
-        has_reasoning_tags = '</think>' in content_str or '</think>' in content_str or '</reasoning>' in content_str
-        
-        logger.debug(f'Checking content for embedded tool calls. Has <tool_call> tags: {has_tool_call_tags}, Has reasoning tags: {has_reasoning_tags}')
-        
-        if has_tool_call_tags:
-            logger.debug(f'Content preview (first 500 chars): {content_str[:500]}...')
-            logger.debug(f'Content preview (last 500 chars): ...{content_str[-500:]}')
-        
-            extracted_tool_calls = extract_tool_calls_from_content(content_str)
-            if extracted_tool_calls:
-                tool_calls = extracted_tool_calls
-            tool_calls_extracted_from_content = True
-            logger.info(f'✅ Extracted {len(tool_calls)} tool call(s) from content')
-            for i, tc in enumerate(tool_calls):
-                if hasattr(tc, 'function'):
-                    func = tc.function
-                    if isinstance(func, dict):
-                        logger.info(f'  Tool call {i+1}: name={func.get("name")}, args={func.get("arguments", "")[:100]}...')
-                    elif hasattr(func, 'name'):
-                        logger.info(f'  Tool call {i+1}: name={func.name}, args={func.arguments[:100] if hasattr(func, "arguments") else "N/A"}...')
-        else:
-            # Log if we expected to find tool calls but didn't
-            if has_tool_call_tags:
-                logger.warning('❌ Found <tool_call> tags in content but failed to extract tool calls')
-                logger.warning(f'Content around tags: {content_str[max(0, content_str.find("<tool_call>")-100):content_str.find("</tool_call>")+100]}')
-
-    if tool_calls:
+    if hasattr(assistant_msg, 'tool_calls') and assistant_msg.tool_calls:
         # Check if there's assistant_msg.content. If so, add it to the thought
-        # Extract reasoning traces if present
-        # For thinking models: everything before </think> is reasoning
         thought = ''
-        reasoning = ''
-        planning_content = ''  # Initialize for use in logging
-        
-        logger.info(f'Processing response with {len(tool_calls)} tool call(s). Tool calls extracted from content: {tool_calls_extracted_from_content}')
-        
-        if content_str:
-            # Extract planning, reasoning, and clean content
-            planning_content = extract_planning_from_content(content_str)
-            cleaned_content, reasoning = extract_reasoning_from_content(content_str)
-            # Remove tool_call tags if they were extracted from content
-            if tool_calls_extracted_from_content:
-                cleaned_content = remove_tool_call_tags(cleaned_content)
-            thought = cleaned_content
-        
-        # Strip planning and reasoning to check if they're non-empty
-        planning_stripped = planning_content.strip() if planning_content else ''
-        reasoning_stripped = reasoning.strip() if reasoning else ''
-        
-        # Log extraction results
-        if planning_stripped:
-            logger.info(f'Extracted planning content: {len(planning_stripped)} characters')
-            logger.debug(f'Planning preview (first 200 chars): {planning_stripped[:200]}...')
-        if reasoning_stripped:
-            logger.info(f'Extracted reasoning trace: {len(reasoning_stripped)} characters (will be minimized in context)')
-            logger.debug(f'Reasoning preview (first 200 chars): {reasoning_stripped[:200]}...')
-        if not planning_stripped and not reasoning_stripped:
-            logger.debug('No planning or reasoning tags found in content')
-        
-        # For thinking models: prioritize planning content for AgentThinkAction
-        # Planning content is useful for context, reasoning is verbose and should be minimized
-        think_content = planning_stripped if planning_stripped else reasoning_stripped
-        
-        # Create AgentThinkAction from planning (preferred) or reasoning (fallback)
-        # Only create if we have content and tool calls were extracted from content
-        if think_content and tool_calls_extracted_from_content:
-            content_type = 'planning' if planning_stripped else 'reasoning'
-            logger.info(f'Creating AgentThinkAction from {content_type} content ({len(think_content)} chars)')
-            think_action = AgentThinkAction(thought=think_content)
-            think_action.response_id = response.id
-            actions.append(think_action)
-            logger.info(f'✅ Created AgentThinkAction from {content_type} content (thought length: {len(think_content)} chars)')
-            
-            # Warn if we found planning but no tool calls (potential planning loop)
-            if planning_stripped and not tool_calls:
-                logger.warning('⚠️ Found planning content but no tool calls - model may be stuck in planning loop')
-        
-        # For regular models or when reasoning should be combined with thought:
-        # Combine planning/reasoning with thought if present (but only if we didn't create a separate think action)
-        if not tool_calls_extracted_from_content:
-            if planning_stripped:
-                thought = f'{planning_stripped}\n{thought}' if thought else planning_stripped
-            elif reasoning_stripped:
-                thought = f'{reasoning_stripped}\n{thought}' if thought else reasoning_stripped
+        if isinstance(assistant_msg.content, str):
+            thought = assistant_msg.content
+        elif isinstance(assistant_msg.content, list):
+            for msg in assistant_msg.content:
+                if msg['type'] == 'text':
+                    thought += msg['text']
 
         # Process each tool call to OpenHands action
-        logger.info(f'Processing {len(tool_calls)} tool call(s) from response:')
-        for i, tool_call in enumerate(tool_calls):
+        for i, tool_call in enumerate(assistant_msg.tool_calls):
             action: Action
-            logger.info(f'  [{i+1}/{len(tool_calls)}] Processing tool call {i+1}')
             logger.debug(f'Tool call in function_calling.py: {tool_call}')
             try:
-                # Handle both dict and object access for function attribute
-                if not hasattr(tool_call, 'function'):
-                    raise FunctionCallValidationError(f'Tool call missing function attribute: {tool_call}')
-                
-                function_obj = tool_call.function
-                
-                # Try multiple methods to access function name and arguments
-                function_name = None
-                function_arguments = None
-                
-                # Method 1: Try dict access
-                if isinstance(function_obj, dict):
-                    function_name = function_obj.get('name', '')
-                    function_arguments = function_obj.get('arguments', '{}')
-                # Method 2: Try attribute access (for litellm objects)
-                elif hasattr(function_obj, 'name'):
-                    function_name = getattr(function_obj, 'name', '')
-                    function_arguments = getattr(function_obj, 'arguments', '{}')
-                # Method 3: Try dict-style get method
-                elif hasattr(function_obj, 'get') and callable(getattr(function_obj, 'get', None)):
-                    function_name = function_obj.get('name', '')
-                    function_arguments = function_obj.get('arguments', '{}')
-                # Method 4: Try accessing as dict-like object
-                elif hasattr(function_obj, '__getitem__'):
-                    try:
-                        function_name = function_obj['name']
-                        function_arguments = function_obj['arguments']
-                    except (KeyError, TypeError):
-                        pass
-                
-                # Validate we got the values
-                if function_name is None or function_arguments is None:
-                    raise FunctionCallValidationError(
-                        f'Unable to access function name/arguments from tool call. Function type: {type(function_obj)}, value: {function_obj}'
-                    )
-                
-                # Ensure function_arguments is a string
-                if not isinstance(function_arguments, str):
-                    function_arguments = json.dumps(function_arguments) if function_arguments else '{}'
-                
-                arguments = json.loads(function_arguments)
+                arguments = json.loads(tool_call.function.arguments)
             except json.decoder.JSONDecodeError as e:
                 raise FunctionCallValidationError(
-                    f'Failed to parse tool call arguments: {function_arguments}'
+                    f'Failed to parse tool call arguments: {tool_call.function.arguments}'
                 ) from e
 
             # ================================================
             # AgentFinishAction
             # ================================================
-            if function_name == FinishTool['function']['name']:
+            if tool_call.function.name == FinishTool['function']['name']:
                 action = AgentFinishAction(
                     final_thought=arguments.get('message', ''),
                 )
@@ -324,10 +146,10 @@ def response_to_actions(
             # ================================================
             # ViewTool (ACI-based file viewer, READ-ONLY)
             # ================================================
-            elif function_name == ViewTool['function']['name']:
+            elif tool_call.function.name == ViewTool['function']['name']:
                 if 'path' not in arguments:
                     raise FunctionCallValidationError(
-                        f'Missing required argument "path" in tool call {function_name}'
+                        f'Missing required argument "path" in tool call {tool_call.function.name}'
                     )
                 action = FileReadAction(
                     path=arguments['path'],
@@ -336,51 +158,18 @@ def response_to_actions(
                 )
 
             # ================================================
-            # str_replace_editor with command='view' (READ-ONLY mapping)
-            # ================================================
-            # Some models (especially thinking models) may output str_replace_editor
-            # even when using ReadOnlyAgent. We map the 'view' command to FileReadAction.
-            elif function_name == STR_REPLACE_EDITOR_TOOL_NAME:
-                if 'command' not in arguments:
-                    raise FunctionCallValidationError(
-                        f'Missing required argument "command" in tool call {function_name}'
-                    )
-                if 'path' not in arguments:
-                    raise FunctionCallValidationError(
-                        f'Missing required argument "path" in tool call {function_name}'
-                    )
-                
-                command = arguments['command']
-                path = arguments['path']
-                
-                # Only allow 'view' command in ReadOnlyAgent (read-only operation)
-                if command == 'view':
-                    action = FileReadAction(
-                        path=path,
-                        impl_source=FileReadSource.OH_ACI,
-                        view_range=arguments.get('view_range', None),
-                    )
-                    logger.debug(f'Mapped str_replace_editor with command=view to FileReadAction for path: {path}')
-                else:
-                    # Reject any write operations (create, str_replace, insert, undo_edit)
-                    raise FunctionCallValidationError(
-                        f'ReadOnlyAgent does not support str_replace_editor command "{command}". '
-                        f'Only "view" command is allowed. Use CodeActAgent for file editing operations.'
-                )
-
-            # ================================================
             # AgentThinkAction
             # ================================================
-            elif function_name == ThinkTool['function']['name']:
+            elif tool_call.function.name == ThinkTool['function']['name']:
                 action = AgentThinkAction(thought=arguments.get('thought', ''))
 
             # ================================================
             # GrepTool (file content search)
             # ================================================
-            elif function_name == GrepTool['function']['name']:
+            elif tool_call.function.name == GrepTool['function']['name']:
                 if 'pattern' not in arguments:
                     raise FunctionCallValidationError(
-                        f'Missing required argument "pattern" in tool call {function_name}'
+                        f'Missing required argument "pattern" in tool call {tool_call.function.name}'
                     )
 
                 pattern = arguments['pattern']
@@ -393,10 +182,10 @@ def response_to_actions(
             # ================================================
             # GlobTool (file pattern matching)
             # ================================================
-            elif function_name == GlobTool['function']['name']:
+            elif tool_call.function.name == GlobTool['function']['name']:
                 if 'pattern' not in arguments:
                     raise FunctionCallValidationError(
-                        f'Missing required argument "pattern" in tool call {function_name}'
+                        f'Missing required argument "pattern" in tool call {tool_call.function.name}'
                     )
 
                 pattern = arguments['pattern']
@@ -408,38 +197,28 @@ def response_to_actions(
             # ================================================
             # MCPAction (MCP)
             # ================================================
-            elif mcp_tool_names and function_name in mcp_tool_names:
+            elif mcp_tool_names and tool_call.function.name in mcp_tool_names:
                 action = MCPAction(
-                    name=function_name,
+                    name=tool_call.function.name,
                     arguments=arguments,
                 )
 
             else:
                 raise FunctionCallNotExistsError(
-                    f'Tool {function_name} is not registered. (arguments: {arguments}). Please check the tool name and retry with an existing tool.'
+                    f'Tool {tool_call.function.name} is not registered. (arguments: {arguments}). Please check the tool name and retry with an existing tool.'
                 )
 
-            # We only add thought to the first action, and only if we didn't create a separate think action
-            # (for thinking models, reasoning is already in the separate think action)
-            # Note: reasoning_stripped is computed above before the loop
-            if i == 0 and not (tool_calls_extracted_from_content and reasoning_stripped):
+            # We only add thought to the first action
+            if i == 0:
                 action = combine_thought(action, thought)
             # Add metadata for tool calling
-            # Safely get tool_call.id (handle both dict and object access)
-            tool_call_id = getattr(tool_call, 'id', None)
-            if tool_call_id is None and isinstance(tool_call, dict):
-                tool_call_id = tool_call.get('id', f'call_{uuid.uuid4().hex[:16]}')
-            elif tool_call_id is None:
-                tool_call_id = f'call_{uuid.uuid4().hex[:16]}'
-            
             action.tool_call_metadata = ToolCallMetadata(
-                tool_call_id=tool_call_id,
-                function_name=function_name,
+                tool_call_id=tool_call.id,
+                function_name=tool_call.function.name,
                 model_response=response,
-                total_calls_in_response=len(tool_calls),
+                total_calls_in_response=len(assistant_msg.tool_calls),
             )
             actions.append(action)
-            logger.info(f'  ✅ [{i+1}/{len(tool_calls)}] Successfully created {type(action).__name__} for tool: {function_name}')
     else:
         actions.append(
             MessageAction(
@@ -454,26 +233,6 @@ def response_to_actions(
     # with the token usage data
     for action in actions:
         action.response_id = response.id
-
-    # Safety check: ensure we always have at least one action
-    # This should never happen, but if it does, create a MessageAction as fallback
-    if len(actions) == 0:
-        logger.warning('No actions were created from response, creating fallback MessageAction')
-        fallback_action = MessageAction(
-            content=str(assistant_msg.content) if assistant_msg.content else '',
-            wait_for_response=True,
-        )
-        fallback_action.response_id = response.id
-        actions.append(fallback_action)
-
-    # Log summary of all created actions
-    action_types = [type(a).__name__ for a in actions]
-    action_summary = ', '.join(f'{action_types.count(t)}x {t}' for t in set(action_types))
-    logger.info(f'📋 Summary: Created {len(actions)} action(s) from response: {action_summary}')
-    # Check if we have reasoning and tool calls (variables may not exist if no tool_calls block executed)
-    if 'reasoning_stripped' in locals() and 'tool_calls_extracted_from_content' in locals():
-        if tool_calls_extracted_from_content and reasoning_stripped:
-            logger.info(f'   └─ Thinking model detected: reasoning trace ({len(reasoning_stripped)} chars) + {len(tool_calls) if "tool_calls" in locals() else 0} tool call(s)')
 
     assert len(actions) >= 1
     return actions

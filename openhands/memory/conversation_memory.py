@@ -1,9 +1,7 @@
-import re
 from typing import Generator
 
 from litellm import ModelResponse
 
-from openhands.agenthub.codeact_agent.function_calling import extract_tool_calls_from_content
 from openhands.core.config.agent_config import AgentConfig
 from openhands.core.logger import openhands_logger as logger
 from openhands.core.message import ImageContent, Message, TextContent
@@ -73,35 +71,6 @@ class ConversationMemory:
             True if the URL is valid, False otherwise
         """
         return bool(url and url.strip())
-
-    @staticmethod
-    def _strip_reasoning_from_content(content: str) -> str:
-        """Remove reasoning tags but keep planning and tool calls.
-        
-        Reasoning tags contain verbose detailed reasoning that should be minimized
-        in context. Planning tags and tool_call tags are preserved.
-        
-        Args:
-            content: The content string that may contain reasoning tags
-            
-        Returns:
-            Content with reasoning tags removed
-        """
-        if not content or not isinstance(content, str):
-            return content
-        
-        # Remove reasoning tags (both paired and standalone closing tags)
-        # Keep planning tags and tool_call tags
-        content = re.sub(r'<reasoning>.*?</reasoning>', '', content, flags=re.DOTALL)
-        content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
-        # Remove standalone closing tags and everything before them (legacy format)
-        content = re.sub(r'.*?</reasoning>', '', content, flags=re.DOTALL)
-        content = re.sub(r'.*?</think>', '', content, flags=re.DOTALL)
-        
-        # Clean up extra whitespace
-        content = re.sub(r'\n\s*\n', '\n', content).strip()
-        
-        return content
 
     def process_events(
         self,
@@ -289,54 +258,15 @@ class ConversationMemory:
             llm_response: ModelResponse = tool_metadata.model_response
             assistant_msg = getattr(llm_response.choices[0], 'message')
 
-            # Extract tool calls - check standard field first, then extract from content if needed
-            tool_calls = assistant_msg.tool_calls
-            if tool_calls is None or len(tool_calls) == 0:
-                # For thinking models, tool calls may be embedded in content
-                content_str = assistant_msg.content
-                if isinstance(content_str, list):
-                    # Handle multi-modal content - extract text parts
-                    content_str = ''.join(
-                        item.get('text', '') if isinstance(item, dict) else str(item)
-                        for item in content_str
-                        if isinstance(item, (str, dict))
-                    )
-                if isinstance(content_str, str) and content_str:
-                    extracted_tool_calls = extract_tool_calls_from_content(content_str)
-                    if extracted_tool_calls:
-                        tool_calls = extracted_tool_calls
-                        logger.debug(f'Extracted {len(tool_calls)} tool call(s) from content in conversation_memory')
-
-            # Get content string for the message
-            content_str = assistant_msg.content
-            if isinstance(content_str, list):
-                # Handle multi-modal content
-                content = []
-                for item in content_str:
-                    if isinstance(item, dict):
-                        if item.get('type') == 'text':
-                            # Strip reasoning tags from text content
-                            text_content = item.get('text', '')
-                            text_content = self._strip_reasoning_from_content(text_content)
-                            content.append(TextContent(text=text_content))
-                        elif item.get('type') == 'image_url':
-                            content.append(ImageContent(image_urls=[item.get('image_url', {}).get('url', '')]))
-                    elif isinstance(item, str):
-                        # Strip reasoning tags from string content
-                        text_content = self._strip_reasoning_from_content(item)
-                        content.append(TextContent(text=text_content))
-            else:
-                # Strip reasoning tags from content string
-                if content_str:
-                    content_str = self._strip_reasoning_from_content(str(content_str))
-                content = [TextContent(text=content_str)] if content_str and str(content_str).strip() else []
-
             # Add the LLM message (assistant) that initiated the tool calls
             # (overwrites any previous message with the same response_id)
             pending_tool_call_action_messages[llm_response.id] = Message(
                 role=getattr(assistant_msg, 'role', 'assistant'),
-                content=content,
-                tool_calls=tool_calls,
+                # tool call content SHOULD BE a string
+                content=[TextContent(text=assistant_msg.content)]
+                if assistant_msg.content and assistant_msg.content.strip()
+                else [],
+                tool_calls=assistant_msg.tool_calls,
             )
             return []
         elif isinstance(action, AgentFinishAction):
@@ -576,89 +506,10 @@ class ConversationMemory:
             )
             message = Message(role='user', content=[TextContent(text=text)])
         elif isinstance(obs, AgentThinkObservation):
-            # For thinking models, the reasoning trace is already in the assistant message
-            # The "Your thought has been logged." message doesn't provide useful context
-            # Skip adding this observation to conversation history to avoid confusion
-            # The model already sees its reasoning in the assistant message
-            logger.debug('Skipping AgentThinkObservation in conversation history - reasoning already in assistant message')
-            return []
+            text = truncate_content(obs.content, max_message_chars)
+            message = Message(role='user', content=[TextContent(text=text)])
         elif isinstance(obs, TaskTrackingObservation):
-            # For task tracking, include the task list details if available
-            # This is crucial for thinking models to understand what tasks were created/updated
-            text = obs.content or ''
-            
-            # If we have a task list and the command was 'plan', include the task details
-            # This helps the model understand what tasks it created and avoid redundant calls
-            if obs.command == 'plan' and obs.task_list:
-                text += '\n\nCurrent Task List:'
-                todo_tasks = []
-                in_progress_tasks = []
-                done_tasks = []
-                
-                for i, task in enumerate(obs.task_list, 1):
-                    status_icon = {
-                        'todo': '⏳',
-                        'in_progress': '🔄',
-                        'done': '✅',
-                    }.get(task.get('status', 'todo'), '⏳')
-                    title = task.get('title', 'Untitled task')
-                    notes = task.get('notes', '')
-                    status = task.get('status', 'todo')
-                    task_text = f'\n{i}. {status_icon} [{status.upper()}] {title}'
-                    if notes:
-                        task_text += f'\n   Notes: {notes}'
-                    
-                    # Group tasks by status for better visibility
-                    if status == 'done':
-                        done_tasks.append(task_text)
-                    elif status == 'in_progress':
-                        in_progress_tasks.append(task_text)
-                    else:
-                        todo_tasks.append(task_text)
-                
-                # Show tasks in priority order: in_progress, todo, done
-                if in_progress_tasks:
-                    text += '\n\n🔄 IN PROGRESS:'
-                    text += ''.join(in_progress_tasks)
-                    text += '\n\n⚠️ ACTION REQUIRED: Continue working on the in-progress task above. Use action tools (execute_bash, str_replace_editor, read_file) to make progress.'
-                
-                if todo_tasks:
-                    text += '\n\n⏳ TODO:'
-                    text += ''.join(todo_tasks)
-                    if not in_progress_tasks:
-                        # If no task is in progress, prompt to start the first todo task
-                        text += '\n\n⚠️ ACTION REQUIRED: Start working on the first TODO task. Use action tools (execute_bash, str_replace_editor, read_file) to begin implementation. Do NOT create more plans - take action!'
-                
-                if done_tasks:
-                    text += '\n\n✅ DONE:'
-                    text += ''.join(done_tasks)
-                
-                logger.debug(f'Including task list details in TaskTrackingObservation ({len(obs.task_list)} tasks: {len(todo_tasks)} todo, {len(in_progress_tasks)} in_progress, {len(done_tasks)} done)')
-            elif obs.command == 'view' and obs.task_list:
-                # For 'view' command, also show task status and next actions
-                text += '\n\nCurrent Task List:'
-                for i, task in enumerate(obs.task_list, 1):
-                    status_icon = {
-                        'todo': '⏳',
-                        'in_progress': '🔄',
-                        'done': '✅',
-                    }.get(task.get('status', 'todo'), '⏳')
-                    title = task.get('title', 'Untitled task')
-                    notes = task.get('notes', '')
-                    status = task.get('status', 'todo')
-                    text += f'\n{i}. {status_icon} [{status.upper()}] {title}'
-                    if notes:
-                        text += f'\n   Notes: {notes}'
-                
-                # Check if there are todo or in_progress tasks
-                has_active_tasks = any(
-                    task.get('status', 'todo') in ['todo', 'in_progress']
-                    for task in obs.task_list
-                )
-                if has_active_tasks:
-                    text += '\n\n⚠️ ACTION REQUIRED: You have active tasks. Use action tools (execute_bash, str_replace_editor, read_file) to work on them. Do NOT create more plans - take action!'
-            
-            text = truncate_content(text, max_message_chars)
+            text = truncate_content(obs.content, max_message_chars)
             message = Message(role='user', content=[TextContent(text=text)])
         elif isinstance(obs, ErrorObservation):
             text = truncate_content(obs.content, max_message_chars)
