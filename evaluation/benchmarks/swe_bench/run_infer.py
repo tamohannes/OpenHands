@@ -15,6 +15,10 @@ from evaluation.benchmarks.swe_bench.binary_patch_utils import (
     remove_binary_diffs,
     remove_binary_files_from_git,
 )
+from evaluation.benchmarks.swe_bench.masking_utils import (
+    _collect_repo_identifiers,
+    mask_problem_statement,
+)
 from evaluation.benchmarks.swe_bench.resource.mapping import (
     get_instance_resource_factor,
 )
@@ -138,7 +142,18 @@ def get_instruction(instance: pd.Series, metadata: EvalMetadata) -> MessageActio
     # Convert pandas Series to dict for easier template access
     # This allows safe access to optional fields like 'locations' and 'findings'
     instance_dict = instance.to_dict() if hasattr(instance, 'to_dict') else dict(instance)
-    
+
+    # Mask file paths, module/line refs, and repo identifiers from the problem
+    # statement so the agent cannot rely on explicit location hints (blind baseline).
+    repo_identifiers = _collect_repo_identifiers(
+        instance_dict.get('instance_id'),
+        instance_dict.get('repo'),
+    )
+    instance_dict['problem_statement'] = mask_problem_statement(
+        instance_dict.get('problem_statement', ''),
+        repo_names=repo_identifiers,
+    )
+
     # Prepare context for rendering
     context = {
         'instance': instance_dict,

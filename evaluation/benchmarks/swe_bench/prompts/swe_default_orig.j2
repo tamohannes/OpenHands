@@ -1,0 +1,121 @@
+<uploaded_files>
+/workspace/{{ workspace_dir_name }}
+</uploaded_files>
+
+I've uploaded a python code repository in the directory {{ workspace_dir_name }}. Consider the following issue description:
+
+<issue_description>
+{{ instance.problem_statement }}
+</issue_description>
+
+{% set direct_locations = instance.locations|default([], true) %}
+{% set edit_locs_obj = instance.edit_locations|default({}, true) %}
+{% set nested_locations = edit_locs_obj.locations|default([], true) if edit_locs_obj else [] %}
+{% set locations_list = direct_locations if direct_locations|length > 0 else nested_locations %}
+{% set has_locations = locations_list|length > 0 %}
+{% set findings_text = instance.findings|default('', true) %}
+{% set has_findings = findings_text|trim|length > 0 %}
+{% if has_locations %}
+<edit_locations>
+Here I provide you the edit locations for Phase 3{% if has_findings %} along with findings that analyze the issue{% endif %}:
+
+**Files to modify:**
+{% for location in locations_list %}
+{{ loop.index }}. {{ location.file_path }}{% if location.start_line is defined and location.start_line is not none %} (lines {{ location.start_line }}-{{ location.end_line }}){% endif %}
+{% endfor %}
+
+{% if has_findings %}
+**Findings:** The following findings provide detailed analysis of the issue, including location explanation, root cause, solution approach, dependencies, and testing considerations. Use these findings to understand the problem and guide your fix:
+
+{{ findings_text }}
+
+**How to Use These Findings Throughout the Phases:**
+- **Location explanation**: Use in Phase 1 (READING) to understand context, and Phase 5 (FIX ANALYSIS) to identify where the problem is located
+- **Root cause**: Reference in Phase 1 (READING) to understand the problem, and Phase 5 (FIX ANALYSIS) to state what the problem is
+- **Solution idea**: Use in Phase 5 (FIX ANALYSIS) to guide how to fix the problem, and Phase 6 (FIX IMPLEMENTATION) to implement the solution
+- **Dependencies**: Consider in Phase 2 (RUNNING) when running tests, and Phase 6 (FIX IMPLEMENTATION) to understand what else might be affected
+- **Testing impact**: Reference in Phase 4 (TEST CREATION) to guide test script creation, and Phase 7 (VERIFICATION) to ensure comprehensive test coverage
+{% endif %}
+
+Since the edit locations are provided above, you can skip Phase 3 (EXPLORATION) and proceed directly to Phase 4 (TEST CREATION) using the provided locations{% if has_findings %}. Before proceeding, review the findings above to understand the root cause, solution approach, and testing considerations{% endif %}.
+</edit_locations>
+{% endif %}
+
+Can you help me implement the necessary changes to the repository so that the requirements specified in the <issue_description> are met?
+I've already taken care of all changes to any of the test files described in the <issue_description>. This means you DON'T have to modify the testing logic or any of the tests in any way!
+Also the development Python environment is already set up for you (i.e., all dependencies already installed), so you don't need to install other packages.
+Your task is to make the minimal changes to non-test files in the /workspace/{{ workspace_dir_name }} directory to ensure the <issue_description> is satisfied.
+
+Follow these phases to resolve the issue:
+
+Phase 1. READING: read the problem and reword it in clearer terms
+   1.1 If there are code or config snippets. Express in words any best practices or conventions in them.
+   1.2 Hightlight message errors, method names, variables, file names, stack traces, and technical details.
+   1.3 Explain the problem in clear terms{% if has_findings %}. Cross-reference with the root cause and location explanation from the provided findings{% endif %}.
+   1.4 Enumerate the steps to reproduce the problem.
+   1.5 Hightlight any best practices to take into account when testing and fixing the issue{% if has_findings %}. Consider the dependencies and testing impact mentioned in the findings{% endif %}.
+{% if has_findings %}
+   1.6 Cross-reference the provided findings with the problem statement to understand the root cause, location explanation, and how they relate to the issue description.
+{% endif %}
+
+Phase 2. RUNNING: install and run the tests on the repository
+   2.1 Follow the readme
+   2.2 Install the environment and anything needed
+   2.3 Iterate and figure out how to run the tests{% if has_findings %}. Pay attention to any dependencies mentioned in the findings that might affect test execution{% endif %}
+{% if has_findings %}
+   2.4 Note any testing impact information from the findings that might help you understand which tests are relevant or what edge cases to consider.
+{% endif %}
+
+{% if has_locations %}
+Phase 3. SKIP EXPLORATION: Since edit locations are provided above, skip the exploration phase and use the provided locations{% if has_findings %}. Before proceeding, carefully review the findings above to understand the location explanation, root cause, and solution approach{% endif %}.
+
+{% else %}
+Phase 3. EXPLORATION: find the files that are related to the problem and possible solutions
+   3.1 Use `grep` to search for relevant methods, classes, keywords and error messages.
+   3.2 Identify all files related to the problem statement.
+   3.3 Propose the methods and files to fix the issue and explain why.
+   3.4 From the possible file locations, select the most likely location to fix the issue{% if has_findings %}. Compare your findings with the provided findings to ensure alignment{% endif %}.
+
+{% endif %}
+Phase 4. TEST CREATION: before implementing any fix, create a script to reproduce and verify the issue.
+   4.1 Look at existing test files in the repository to understand the test format/structure.
+   4.2 Create a minimal reproduction script that reproduces the located issue{% if has_findings %}. Consider any dependencies mentioned in the findings that should be included in the reproduction script{% endif %}.
+   4.3 Run the reproduction script to confirm you are reproducing the issue.
+   4.4 Adjust the reproduction script as necessary.
+{% if has_findings %}
+   4.5 Use the testing impact information from the findings to guide your test script creation, ensuring you cover the scenarios and edge cases mentioned in the findings.
+{% endif %}
+
+Phase 5. FIX ANALYSIS: state clearly the problem and how to fix it
+   5.1 State clearly what the problem is{% if has_findings %}. Reference the root cause from the provided findings and ensure your understanding aligns with it{% endif %}.
+   5.2 State clearly where the problem is located{% if has_locations %} (refer to the provided edit locations){% endif %}{% if has_findings %}. Use the location explanation from the findings to understand the context and specific location of the issue{% endif %}.
+   5.3 State clearly how the test reproduces the issue.
+   5.4 State clearly the best practices to take into account in the fix{% if has_findings %}. Consider any dependencies mentioned in the findings that might affect the fix{% endif %}.
+   5.5 State clearly how to fix the problem{% if has_findings %}. Reference the solution idea from the findings to guide your approach{% endif %}.
+{% if has_findings %}
+   5.6 Compare your analysis with the provided findings and ensure alignment. Verify that your understanding of the root cause, location, and solution approach matches the findings.
+{% endif %}
+
+Phase 6. FIX IMPLEMENTATION: Edit the source code to implement your chosen solution.
+   6.1 Make minimal, focused changes to fix the issue{% if has_findings %}. Follow the solution approach outlined in the findings while making minimal changes{% endif %}.
+{% if has_findings %}
+   6.2 Consider any dependencies mentioned in the findings that might be affected by your changes or that you need to account for in the implementation.
+{% endif %}
+
+Phase 7. VERIFICATION: Test your implementation thoroughly.
+   7.1 Run your reproduction script to verify the fix works.
+   7.2 Add edge cases to your test script to ensure comprehensive coverage{% if has_findings %}. Ensure you cover any edge cases or scenarios mentioned in the testing impact section of the findings{% endif %}.
+   7.3 Run existing tests related to the modified code to ensure you haven't broken anything{% if has_findings %}. Pay special attention to tests related to dependencies mentioned in the findings{% endif %}.
+
+8. FINAL REVIEW: Carefully re-read the problem description and compare your changes with the base commit {{ instance.base_commit }}.
+   8.1 Ensure you've fully addressed all requirements.
+   8.2 Run any tests in the repository related to:
+     8.2.1 The issue you are fixing
+     8.2.2 The files you modified
+     8.2.3 The functions you changed
+   8.3 If any tests fail, revise your implementation until all tests pass
+{% if has_findings %}
+   8.4 Verify that your implementation addresses all aspects mentioned in the findings: the root cause has been fixed, dependencies have been considered, and testing considerations from the findings have been addressed.
+{% endif %}
+
+Be thorough in your exploration, testing, and reasoning. It's fine if your thinking process is lengthy - quality and completeness are more important than brevity.
