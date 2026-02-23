@@ -142,6 +142,23 @@ def get_instruction(instance: pd.Series, metadata: EvalMetadata) -> MessageActio
     # Convert pandas Series to dict for easier template access
     # This allows safe access to optional fields like 'locations' and 'findings'
     instance_dict = instance.to_dict() if hasattr(instance, 'to_dict') else dict(instance)
+    # Normalize optional prompt fields to avoid Jinja runtime errors when dataset
+    # contains NaN/non-collection values (common for partially-populated columns).
+    locations_val = instance_dict.get('locations')
+    if not isinstance(locations_val, list):
+        instance_dict['locations'] = []
+
+    edit_locations_val = instance_dict.get('edit_locations')
+    if isinstance(edit_locations_val, dict):
+        nested_locations_val = edit_locations_val.get('locations')
+        if not isinstance(nested_locations_val, list):
+            edit_locations_val['locations'] = []
+    else:
+        instance_dict['edit_locations'] = {'locations': []}
+
+    findings_val = instance_dict.get('findings')
+    if not isinstance(findings_val, str):
+        instance_dict['findings'] = ''
 
     # Mask file paths, module/line refs, and repo identifiers from the problem
     # statement so the agent cannot rely on explicit location hints (blind baseline).
